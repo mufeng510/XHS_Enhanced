@@ -1,0 +1,12 @@
+{
+  "name": "xhs-web-enhancement",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zero-dependency userscript and local validation harness",
+  "scripts": {
+    "check": "node scripts/static-check.cjs",
+    "test:unit": "node --test --test-isolation=none tests/unit/userscript.test.cjs",
+    "test:browser": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-browser-tests.ps1",
+    "test": "npm run check && npm run test:unit && npm run test:browser"
+  }
+}
