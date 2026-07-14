@@ -1,0 +1,14 @@
+<!doctype html>
+<html data-test-result="pending" data-test-terminal-writes="0">
+<head><meta charset="utf-8"><title>XHS Enhanced Browser Harness</title></head>
+<body>
+  <h1>Browser harness</h1><ol id="results"></ol><div id="sandbox-host"><main id="sandbox"></main></div>
+  <iframe hidden id="search-source" src="../fixtures/search-page.html"></iframe>
+  <iframe hidden id="profile-source" src="../fixtures/profile-page.html"></iframe>
+  <iframe hidden id="dynamic-source" src="../fixtures/dynamic-page.html"></iframe>
+  <iframe hidden id="off-source" src="test-mode-off.html"></iframe>
+  <script>globalThis.__XHS_ENHANCED_TEST_MODE__=true;</script>
+  <script src="../../xhs-enhanced.user.js"></script>
+  <script src="harness.js"></script>
+</body>
+</html>

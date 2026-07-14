@@ -1,0 +1,47 @@
+# 小红书网页版增强
+
+一个零运行时依赖、单文件的 Tampermonkey 用户脚本，用于在小红书网页版快速识别热门笔记。
+
+## 功能
+
+- 在搜索结果页和用户主页中，高亮点赞数**严格大于 100**的笔记卡片；
+- 同时高亮卡片内的点赞数；
+- 自动处理首屏内容、无限滚动新增内容、属性更新和站内 SPA 导航；
+- 不展示或推断笔记发布时间。
+
+## 安装
+
+1. 在桌面版 Chrome 或 Edge 中安装 Tampermonkey。
+2. 新建用户脚本，将 [`xhs-enhanced.user.js`](./xhs-enhanced.user.js) 的完整内容粘贴并保存。
+3. 打开小红书搜索结果页或用户主页。
+
+脚本仅匹配：
+
+- `https://www.xiaohongshu.com/search_result*`
+- `https://www.xiaohongshu.com/user/profile/*`
+
+脚本使用 `@grant none`，不声明网络、存储、剪贴板或菜单权限，不收集或上传页面数据。
+
+## 点赞数规则
+
+- 支持明确的整数、分组整数以及常见的 `万`、`w/W`、`k/K` 缩写；
+- 仅当解析结果严格大于 100 时高亮；
+- 歧义或无法解析的文本不会高亮；
+- 无法确认笔记卡片或点赞控件时会保守跳过，避免误高亮大容器。
+
+## 本地验证
+
+需要 Node.js，以及本机 Chrome 或 Edge（二者之一）用于原生浏览器测试：
+
+```powershell
+npm run check
+npm run test:unit
+npm run test:browser
+npm test
+```
+
+测试不安装任何 npm 包。浏览器测试仅将唯一、明确的 `pass` 终态视为成功；`pending`、超时、脚本错误或多个终态均失败。
+
+## 兼容性边界
+
+设计兼容目标为最新版桌面 Chrome 和 Edge。真实小红书 DOM 可能因页面改版或 A/B 实验变化；本地夹具通过不等同于线上选择器已验证。
