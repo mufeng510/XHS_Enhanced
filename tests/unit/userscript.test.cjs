@@ -44,3 +44,24 @@ test('signature is deterministic and changes with each material input', () => {
   assert.notEqual(s('/user/profile/a', '101'), base);
   assert.notEqual(s('/search_result', '102'), base);
 });
+
+test('next popular card selection skips viewport and chooses nearest without mutation', () => {
+  const select = load().__XHS_ENHANCED_TEST_API__.selectNextPopularCard;
+  function candidate(top, { connected = true, popular = true } = {}) {
+    return {
+      isConnected: connected,
+      classList: { contains: name => popular && name === 'xhs-enhanced-card--popular' },
+      getBoundingClientRect: () => ({ top, bottom: top + 200 })
+    };
+  }
+  const boundary = candidate(800);
+  assert.equal(select([candidate(100), candidate(750), boundary], 800), boundary);
+  const far = candidate(1200), nearest = candidate(810), middle = candidate(900);
+  const input = Object.freeze([far, nearest, middle]);
+  assert.equal(select(input, 800), nearest);
+  assert.deepEqual(input, [far, nearest, middle]);
+  const tiedFirst = candidate(810), tiedSecond = candidate(810);
+  assert.equal(select([tiedFirst, tiedSecond], 800), tiedFirst);
+  assert.equal(select([candidate(-10), candidate(900, { connected: false }), candidate(900, { popular: false })], 800), null);
+  assert.equal(select([], 800), null);
+});

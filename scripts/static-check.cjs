@@ -6,12 +6,13 @@ const file = 'xhs-enhanced.user.js';
 const source = fs.readFileSync(file, 'utf8');
 execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
 execFileSync(process.execPath, ['--check', 'tests/browser/harness.js'], { stdio: 'inherit' });
+execFileSync(process.execPath, ['--check', 'scripts/browser-test-server.cjs'], { stdio: 'inherit' });
 for (const line of [
   '@match        https://www.xiaohongshu.com/search_result*',
   '@match        https://www.xiaohongshu.com/user/profile/*',
   '@grant        none', '@run-at       document-idle'
 ]) assert(source.includes(line), `missing metadata: ${line}`);
-for (const forbidden of ['@connect', '@require', 'fetch(', 'XMLHttpRequest', 'WebSocket', 'sendBeacon', 'GM_xmlhttpRequest', 'preventDefault(', 'stopPropagation(', 'stopImmediatePropagation(', '.innerHTML =']) {
+for (const forbidden of ['@connect', '@require', 'fetch(', 'XMLHttpRequest', 'WebSocket', 'sendBeacon', 'GM_xmlhttpRequest', 'preventDefault(', 'stopPropagation(', 'stopImmediatePropagation(', '.innerHTML =', 'alert(']) {
   assert(!source.includes(forbidden), `forbidden API/pattern: ${forbidden}`);
 }
 const matchCount = (source.match(/^\/\/ @match/gm) || []).length;
@@ -20,4 +21,5 @@ assert(source.includes('attributeFilter: READ_ATTRIBUTES.slice()'), 'filtered at
 for (const attribute of ['aria-label', 'title', 'data-like-count', 'data-xhs-like-count']) assert(source.includes(`'${attribute}'`));
 for (const forbiddenAttribute of ['datetime', 'data-publish-time', 'data-xhs-publish-time']) assert(!/READ_ATTRIBUTES[\s\S]{0,300}/.exec(source)?.[0].includes(`'${forbiddenAttribute}'`), `unused time attribute in observer filter: ${forbiddenAttribute}`);
 assert(!source.includes('xhs-enhanced-publish-time'), 'publication-time UI must not be generated');
+for (const required of ["'xhs-enhanced-jump-next'", "'xhs-enhanced-jump-status'", "setAttribute('role', 'status')", "setAttribute('aria-live', 'polite')"]) assert(source.includes(required), `missing jump UI contract: ${required}`);
 console.log('Static checks passed.');

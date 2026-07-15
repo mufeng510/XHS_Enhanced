@@ -1,0 +1,30 @@
+# Node.js / TypeScript typical ignores
+node_modules/
+# Build output directories
+dist/
+build/
+# Dependency lock files (keep if needed, but often not ignored)
+# npm-debug.log
+npm-debug.log*
+# Environment files
+.env
+.env.local
+# OS generated files
+.DS_Store
+Thumbs.db
+# Logs
+logs/
+*.log
+# Temporary files
+*.tmp
+*.swp
+# IDE / editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+# OMC state (keep if you want OMC to retain its own data, but you may ignore if not needed)
+.omc/
+# Other generated files
+coverage/
+*.tsbuildinfo

@@ -48,6 +48,9 @@
   }
   function card(name) { return sandbox.querySelector(`[data-case="${name}"]`); }
   function popular(node) { return node.classList.contains('xhs-enhanced-card--popular'); }
+  function jumpButton() { return document.getElementById('xhs-enhanced-jump-next'); }
+  function statusNode() { return document.getElementById('xhs-enhanced-jump-status'); }
+  function setRect(node, top, bottom = top + 200) { node.getBoundingClientRect = () => ({ top, bottom, left: 0, right: 100, width: 100, height: bottom - top }); }
 
   addEventListener('error', event => failures.push(`window error: ${event.message}`));
   addEventListener('unhandledrejection', event => failures.push(`unhandled rejection: ${String(event.reason)}`));
@@ -82,6 +85,55 @@
     const link = document.createElement('a'); link.href = `/explore/${name}`; link.textContent = name;
     const like = document.createElement('button'); like.setAttribute(attribute, attribute === 'aria-label' || attribute === 'title' ? `点赞 ${value}` : value); like.textContent = value;
     node.append(link, like); return node;
+  }
+
+  async function jumpNavigation() {
+    api.setTestRoute('/search_result');
+    const above = makeCard('jump-above', 101);
+    const visible = makeCard('jump-visible', 101);
+    const partial = makeCard('jump-partial', 101);
+    const far = makeCard('jump-far', 101);
+    const nearest = makeCard('jump-nearest', 101);
+    const ordinary = makeCard('jump-ordinary', 100);
+    sandbox.replaceChildren(above, visible, partial, far, nearest, ordinary);
+    const viewport = globalThis.innerHeight || document.documentElement.clientHeight;
+    setRect(above, -200, -20); setRect(visible, 100, 300); setRect(partial, viewport - 50, viewport + 150);
+    setRect(far, viewport + 400); setRect(nearest, viewport + 10); setRect(ordinary, viewport + 5);
+    const calls = new Map();
+    for (const node of [above, visible, partial, far, nearest, ordinary]) node.scrollIntoView = options => calls.set(node, (calls.get(node) || []).concat([options]));
+    const originalScrollTo = globalThis.scrollTo;
+    const scrollCalls = [];
+    globalThis.scrollTo = options => scrollCalls.push(options);
+    try {
+      api.scan(); await checkpoint();
+      assert(jumpButton() && jumpButton().type === 'button' && jumpButton().textContent === '下一条热门笔记', 'jump button is present and accessible on target route');
+      assert(document.querySelectorAll('#xhs-enhanced-jump-next').length === 1, 'jump button is unique');
+      jumpButton().click();
+      assert((calls.get(nearest) || []).length === 1 && calls.get(nearest)[0].behavior === 'smooth' && calls.get(nearest)[0].block === 'center', 'jump selects nearest popular card below viewport');
+      assert(!calls.has(above) && !calls.has(visible) && !calls.has(partial) && !calls.has(ordinary), 'jump skips intersecting and non-popular cards');
+
+      setRect(nearest, 100, 300); setRect(far, viewport + 10);
+      jumpButton().click();
+      assert((calls.get(far) || []).length === 1, 'second jump advances after geometry changes');
+
+      setRect(far, 100, 300);
+      jumpButton().click();
+      assert(scrollCalls.length === 1 && scrollCalls[0].behavior === 'smooth', 'last popular note scrolls to document bottom');
+      assert(statusNode() && statusNode().textContent === '已经是最后一条热门笔记' && statusNode().getAttribute('role') === 'status' && statusNode().getAttribute('aria-live') === 'polite', 'last-note status is live and non-blocking');
+      jumpButton().click();
+      assert(document.querySelectorAll('#xhs-enhanced-jump-status').length === 1, 'repeated last-note clicks reuse one status');
+
+      const dynamic = makeCard('jump-dynamic', 101); setRect(dynamic, viewport + 10); dynamic.scrollIntoView = options => calls.set(dynamic, [options]); sandbox.appendChild(dynamic);
+      await checkpoint(); jumpButton().click();
+      assert((calls.get(dynamic) || []).length === 1 && !statusNode(), 'dynamic popular card becomes next target and clears status');
+
+      api.setTestRoute('/explore/abc'); await checkpoint();
+      assert(!jumpButton() && !statusNode(), 'leaving supported route removes jump UI');
+      api.setTestRoute('/user/profile/jump'); await checkpoint();
+      assert(document.querySelectorAll('#xhs-enhanced-jump-next').length === 1, 'returning to supported route restores one jump button');
+    } finally {
+      globalThis.scrollTo = originalScrollTo;
+    }
   }
 
   async function dynamicAndAttributes() {
@@ -153,10 +205,68 @@
     const win = frame.contentWindow; const offCard = frame.contentDocument.querySelector('[data-note-card]');
     assert(win.__XHS_ENHANCED_TEST_API__ === undefined, 'test API absent when test mode is off');
     assert(!offCard.classList.contains('xhs-enhanced-card--popular'), 'forged route cannot bypass real file route');
-    api.destroy(); await checkpoint();
-    assert(!sandbox.querySelector('.xhs-enhanced-card--popular') && !document.getElementById('xhs-enhanced-style'), 'destroy cleans owned state');
+    const generationOne = history.pushState;
+    const thirdPartyPushState = function (...args) { return generationOne.apply(this, args); };
+    history.pushState = thirdPartyPushState;
+    const originalRaf = globalThis.requestAnimationFrame;
+    const queuedRafs = [];
+    globalThis.requestAnimationFrame = callback => { queuedRafs.push(callback); return queuedRafs.length; };
+    api.scan();
+    api.destroy();
+    assert(!sandbox.querySelector('.xhs-enhanced-card--popular') && !document.getElementById('xhs-enhanced-style') && !jumpButton() && !statusNode(), 'destroy cleans owned state and jump UI');
+    assert(history.pushState === thirdPartyPushState && history.replaceState === globalThis.__XHS_ORIGINAL_HISTORY__.replaceState, 'destroy preserves a third-party History wrapper and restores identity-safe methods');
+    api.init();
+    const beforeStaleRaf = api.getCounters().batches;
+    queuedRafs[0]();
+    assert(api.getCounters().batches === beforeStaleRaf, 'stale animation-frame callback cannot flush a new lifecycle');
+    queuedRafs[1]();
+    assert(api.getCounters().batches === beforeStaleRaf + 1, 'current animation-frame callback flushes exactly once');
+    globalThis.requestAnimationFrame = originalRaf;
+    api.setTestRoute('/search_result'); api.scan(); await checkpoint();
+    const generationTwo = history.pushState;
+    const beforeGenerationCall = api.getCounters().routeSignals;
+    history.pushState({}, '', '/search_result?generation=2'); await checkpoint();
+    assert(generationTwo !== generationOne && api.getCounters().routeSignals === beforeGenerationCall + 1, 'only current History generation signals through preserved third-party chain');
+    api.destroy();
+    assert(history.pushState === thirdPartyPushState, 'destroying current generation restores preserved third-party wrapper');
+    const beforeInactiveCall = api.getCounters().routeSignals;
+    history.pushState({}, '', '/search_result?inactive-generation=1');
+    assert(api.getCounters().routeSignals === beforeInactiveCall, 'inactive prior History generation remains permanent pass-through');
     api.init(); api.setTestRoute('/search_result'); api.scan(); await checkpoint();
-    assert(document.querySelectorAll('#xhs-enhanced-style').length === 1, 're-init creates one lifecycle');
+    const pushWrapper = history.pushState; api.init();
+    assert(document.querySelectorAll('#xhs-enhanced-style').length === 1 && document.querySelectorAll('#xhs-enhanced-jump-next').length === 1 && history.pushState === pushWrapper, 're-init creates one idempotent lifecycle');
+    history.replaceState({}, '', '/search_result'); await checkpoint();
+  }
+
+  async function productionHistorySignals() {
+    api.clearTestRoute(); await checkpoint();
+    assert(location.pathname === '/search_result', 'browser harness starts on real supported pathname');
+    const beforePush = api.getCounters().routeSignals;
+    history.pushState({}, '', '/explore/architect-route-test'); await checkpoint();
+    assert(api.getCounters().routeSignals === beforePush + 1 && !jumpButton(), 'pushState produces one route signal and removes UI');
+    const beforeReplace = api.getCounters().routeSignals;
+    history.replaceState({}, '', '/user/profile/architect-route-test'); await checkpoint();
+    assert(api.getCounters().routeSignals === beforeReplace + 1 && document.querySelectorAll('#xhs-enhanced-jump-next').length === 1, 'replaceState produces one route signal and restores UI');
+    const beforeFailure = api.getCounters().routeSignals;
+    let threw = false;
+    try { history.pushState({}, '', 'https://example.com/forbidden'); } catch { threw = true; }
+    assert(threw && api.getCounters().routeSignals === beforeFailure, 'failed History call preserves exception and emits no signal');
+    history.replaceState({}, '', '/search_result'); await checkpoint();
+  }
+
+  async function bodyObserverQuiescence() {
+    api.setTestRoute('/search_result');
+    const fallbackRoot = document.createElement('div'); fallbackRoot.id = 'sandbox';
+    sandbox.replaceWith(fallbackRoot); sandbox = fallbackRoot;
+    await checkpoint();
+    assert(api.getCounters().observerRootIsBody, 'observer falls back to body when no content root matches');
+    jumpButton().click(); await checkpoint();
+    assert(statusNode(), 'body observer permits last-note status UI');
+    await delay(3100); await checkpoint();
+    const stable = api.getCounters().batches; await checkpoint(); await checkpoint();
+    assert(api.getCounters().batches === stable, 'owned jump UI mutations become quiescent under body observer');
+    const dynamic = makeCard('body-fallback-dynamic', 101); fallbackRoot.appendChild(dynamic); await checkpoint();
+    assert(popular(dynamic), 'body fallback observer still processes dynamic cards');
   }
 
   function finish(status) {
@@ -175,8 +285,11 @@
       await initialAndIdempotent();
       await profile();
       await dynamicAndAttributes();
+      await jumpNavigation();
       await spaRootReplacement();
       await navigationAndNonInvasive();
+      await bodyObserverQuiescence();
+      await productionHistorySignals();
       await testModeOffAndLifecycle();
       await checkpoint();
       if (failures.length) throw new Error(failures.join('; '));

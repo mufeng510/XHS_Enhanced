@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/local/xhs-enhanced
-// @version      1.0.0
-// @description  高亮搜索页和用户主页中点赞数大于 100 的笔记
+// @version      1.1.0
+// @description  高亮热门笔记并快速跳转到下一条
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
 // @grant        none
@@ -19,6 +19,10 @@
   const CARD_CLASS = 'xhs-enhanced-card--popular';
   const LIKE_CLASS = 'xhs-enhanced-like--popular';
   const SIGNATURE_ATTRIBUTE = 'data-xhs-enhanced-signature';
+  const JUMP_BUTTON_ID = 'xhs-enhanced-jump-next';
+  const JUMP_STATUS_ID = 'xhs-enhanced-jump-status';
+  const JUMP_BUTTON_TEXT = '下一条热门笔记';
+  const LAST_NOTE_TEXT = '已经是最后一条热门笔记';
 
   const SELECTORS = Object.freeze({
     noteLinks: 'a[href*="/explore/"],a[href*="/discovery/item/"]',
@@ -35,10 +39,19 @@
   let structureObserver = null;
   let observerRoot = null;
   let scheduled = false;
-  let destroyed = false;
+  let destroyed = true;
+  let initialized = false;
+  let lifecycleToken = null;
   let lastUrl = '';
+  let jumpButton = null;
+  let jumpStatus = null;
+  let jumpStatusTimer = null;
+  let originalPushState = null;
+  let originalReplaceState = null;
+  let ownedPushState = null;
+  let ownedReplaceState = null;
   const pending = new Set();
-  const counters = { batches: 0, processed: 0, fullScans: 0 };
+  const counters = { batches: 0, processed: 0, fullScans: 0, routeSignals: 0 };
   const eventBindings = [];
 
   function normalizeSpace(value) {
@@ -129,6 +142,9 @@
     style.textContent = `
       .${CARD_CLASS}{outline:2px solid #ff2442!important;background:rgba(255,36,66,.07)!important;box-shadow:0 2px 10px rgba(255,36,66,.14)!important}
       .${LIKE_CLASS}{color:#ff2442!important;font-weight:700!important}
+      #${JUMP_BUTTON_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
+      #${JUMP_BUTTON_ID}:hover{background:#e61e3c}#${JUMP_BUTTON_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
+      #${JUMP_STATUS_ID}{position:fixed;top:138px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
     `;
     (ROOT.document.head || ROOT.document.documentElement).appendChild(style);
   }
@@ -160,10 +176,95 @@
     for (const card of ROOT.document.querySelectorAll(`.${CARD_CLASS},[${SIGNATURE_ATTRIBUTE}]`)) cleanupCard(card);
   }
 
+  function selectNextPopularCard(cards, viewportHeight) {
+    let selected = null;
+    let selectedTop = Infinity;
+    for (const card of cards || []) {
+      if (!card || !card.isConnected || !card.classList || !card.classList.contains(CARD_CLASS) || typeof card.getBoundingClientRect !== 'function') continue;
+      const rect = card.getBoundingClientRect();
+      const top = Number(rect && rect.top);
+      if (!Number.isFinite(top) || top < viewportHeight || top >= selectedTop) continue;
+      selected = card;
+      selectedTop = top;
+    }
+    return selected;
+  }
+
+  function clearJumpStatus() {
+    if (jumpStatusTimer !== null) ROOT.clearTimeout(jumpStatusTimer);
+    jumpStatusTimer = null;
+    const node = jumpStatus && jumpStatus.isConnected ? jumpStatus : ROOT.document && ROOT.document.getElementById(JUMP_STATUS_ID);
+    if (node) node.remove();
+    jumpStatus = null;
+  }
+
+  function showJumpStatus() {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let node = jumpStatus && jumpStatus.isConnected ? jumpStatus : ROOT.document.getElementById(JUMP_STATUS_ID);
+    if (!node) {
+      node = ROOT.document.createElement('div');
+      node.id = JUMP_STATUS_ID;
+      node.setAttribute('role', 'status');
+      node.setAttribute('aria-live', 'polite');
+      node.textContent = LAST_NOTE_TEXT;
+      ROOT.document.body.appendChild(node);
+    }
+    jumpStatus = node;
+    if (jumpStatusTimer !== null) ROOT.clearTimeout(jumpStatusTimer);
+    jumpStatusTimer = ROOT.setTimeout(() => { jumpStatusTimer = null; clearJumpStatus(); }, 3000);
+  }
+
+  function jumpToNextPopularCard() {
+    if (!ROOT.document) return;
+    const viewportHeight = ROOT.innerHeight || ROOT.document.documentElement.clientHeight || 0;
+    const target = selectNextPopularCard(ROOT.document.querySelectorAll(`.${CARD_CLASS}`), viewportHeight);
+    if (target) {
+      clearJumpStatus();
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    const documentElement = ROOT.document.documentElement;
+    const body = ROOT.document.body;
+    const bottom = Math.max(documentElement ? documentElement.scrollHeight : 0, body ? body.scrollHeight : 0);
+    if (typeof ROOT.scrollTo === 'function') ROOT.scrollTo({ top: bottom, behavior: 'smooth' });
+    showJumpStatus();
+  }
+
+  function ensureJumpUi() {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let button = jumpButton && jumpButton.isConnected ? jumpButton : ROOT.document.getElementById(JUMP_BUTTON_ID);
+    if (!button) {
+      button = ROOT.document.createElement('button');
+      button.id = JUMP_BUTTON_ID;
+      button.type = 'button';
+      button.textContent = JUMP_BUTTON_TEXT;
+      button.setAttribute('aria-label', JUMP_BUTTON_TEXT);
+      button.addEventListener('click', jumpToNextPopularCard);
+      ROOT.document.body.appendChild(button);
+    }
+    jumpButton = button;
+  }
+
+  function removeJumpUi() {
+    clearJumpStatus();
+    const button = jumpButton && jumpButton.isConnected ? jumpButton : ROOT.document && ROOT.document.getElementById(JUMP_BUTTON_ID);
+    if (button) {
+      button.removeEventListener('click', jumpToNextPopularCard);
+      button.remove();
+    }
+    jumpButton = null;
+  }
+
+  function syncJumpUi() {
+    if (isTargetRoute(getCurrentRoute())) ensureJumpUi();
+    else removeJumpUi();
+  }
+
   function flush() {
     scheduled = false;
     if (destroyed || !ROOT.document) return;
     counters.batches += 1;
+    syncJumpUi();
     const url = ROOT.location ? ROOT.location.href : getCurrentRoute();
     if (url !== lastUrl) {
       lastUrl = url;
@@ -192,7 +293,11 @@
     }
     if (scheduled) return;
     scheduled = true;
-    const run = () => flush();
+    const token = lifecycleToken;
+    const run = () => {
+      if (!token || !token.active || lifecycleToken !== token) return;
+      flush();
+    };
     if (typeof ROOT.requestAnimationFrame === 'function') ROOT.requestAnimationFrame(run);
     else Promise.resolve().then(run);
   }
@@ -246,8 +351,50 @@
     if (bindObserverRoot(nextRoot)) scan(nextRoot);
   }
 
+  function signalRoute() {
+    if (destroyed) return;
+    counters.routeSignals += 1;
+    lastUrl = '';
+    scan(ROOT.document);
+    schedule();
+  }
+
+  function installHistorySignals() {
+    if (!ROOT.history) return;
+    originalPushState = ROOT.history.pushState;
+    originalReplaceState = ROOT.history.replaceState;
+    const upstreamPushState = originalPushState;
+    const upstreamReplaceState = originalReplaceState;
+    const token = lifecycleToken;
+    ownedPushState = function (...args) {
+      const result = upstreamPushState.apply(this, args);
+      if (token && token.active && lifecycleToken === token) signalRoute();
+      return result;
+    };
+    ownedReplaceState = function (...args) {
+      const result = upstreamReplaceState.apply(this, args);
+      if (token && token.active && lifecycleToken === token) signalRoute();
+      return result;
+    };
+    ROOT.history.pushState = ownedPushState;
+    ROOT.history.replaceState = ownedReplaceState;
+  }
+
+  function restoreHistorySignals() {
+    if (ROOT.history) {
+      if (ROOT.history.pushState === ownedPushState) ROOT.history.pushState = originalPushState;
+      if (ROOT.history.replaceState === ownedReplaceState) ROOT.history.replaceState = originalReplaceState;
+    }
+    originalPushState = null;
+    originalReplaceState = null;
+    ownedPushState = null;
+    ownedReplaceState = null;
+  }
+
   function init() {
-    if (!ROOT.document || destroyed === false && observer) return;
+    if (!ROOT.document || initialized) return;
+    initialized = true;
+    lifecycleToken = { active: true };
     destroyed = false;
     ensureStyle();
     bindObserverRoot(selectObserverRoot());
@@ -255,15 +402,20 @@
       structureObserver = new ROOT.MutationObserver(structureMutationCallback);
       structureObserver.observe(ROOT.document.documentElement, { childList: true, subtree: true });
     }
-    const routeHandler = () => { lastUrl = ''; scan(ROOT.document); schedule(); };
-    bind(ROOT, 'popstate', routeHandler);
-    bind(ROOT, 'hashchange', routeHandler);
-    bind(ROOT.document, 'visibilitychange', routeHandler);
+    bind(ROOT, 'popstate', signalRoute);
+    bind(ROOT, 'hashchange', signalRoute);
+    bind(ROOT.document, 'visibilitychange', signalRoute);
+    installHistorySignals();
     lastUrl = '';
     scan(ROOT.document);
+    syncJumpUi();
   }
 
   function destroy() {
+    if (!initialized) return;
+    initialized = false;
+    if (lifecycleToken) lifecycleToken.active = false;
+    lifecycleToken = null;
     destroyed = true;
     scheduled = false;
     pending.clear();
@@ -273,13 +425,15 @@
     if (structureObserver) structureObserver.disconnect();
     structureObserver = null;
     for (const [target, type, handler] of eventBindings.splice(0)) target.removeEventListener(type, handler);
+    restoreHistorySignals();
+    removeJumpUi();
     cleanupAll();
     const style = ROOT.document && ROOT.document.getElementById(STYLE_ID);
     if (style) style.remove();
   }
 
   const pureApi = Object.freeze({
-    parseLikeCount, isTargetRoute, getCurrentRoute, signatureFor,
+    parseLikeCount, isTargetRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
     READ_ATTRIBUTES, SELECTORS
   });
 
@@ -288,7 +442,7 @@
       setTestRoute(pathname, scheduleChange = true) { routeProvider = () => String(pathname || ''); lastUrl = ''; if (scheduleChange) schedule(ROOT.document); },
       clearTestRoute() { routeProvider = null; lastUrl = ''; schedule(ROOT.document); },
       scan: () => scan(ROOT.document), flush, init, destroy,
-      getCounters: () => Object.assign({}, counters)
+      getCounters: () => Object.assign({}, counters, { bindings: eventBindings.length, ownedHistoryWrappers: Number(Boolean(ownedPushState)) + Number(Boolean(ownedReplaceState)), observerRootIsBody: observerRoot === ROOT.document.body })
     });
   }
 
