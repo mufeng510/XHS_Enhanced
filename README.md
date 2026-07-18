@@ -13,6 +13,12 @@
 
 ## 安装
 
+### 方式一：通过 Greasy Fork 安装（推荐）
+1. 在桌面版 Chrome 或 Edge 中安装 Tampermonkey。
+2. 访问 [Greasy Fork 脚本页面](https://greasyfork.org/zh-CN/scripts/587483) 点击安装。
+3. 打开小红书搜索结果页或用户主页。
+
+### 方式二：本地安装
 1. 在桌面版 Chrome 或 Edge 中安装 Tampermonkey。
 2. 新建用户脚本，将 [`xhs-enhanced.user.js`](./xhs-enhanced.user.js) 的完整内容粘贴并保存。
 3. 打开小红书搜索结果页或用户主页。
@@ -31,19 +37,18 @@
 - 歧义或无法解析的文本不会高亮；
 - 无法确认笔记卡片或点赞控件时会保守跳过，避免误高亮大容器。
 
+## 相关链接
+
+- **GitHub 仓库**：https://github.com/mufeng510/XHS_Enhanced
+- **Greasy Fork 脚本**：https://greasyfork.org/zh-CN/scripts/587483
+
 ## 本地验证
 
-需要 Node.js，以及本机 Chrome 或 Edge（二者之一）用于原生浏览器测试：
-
-```powershell
-npm run check
-npm run test:unit
-npm run test:browser
+```bash
+npm install
 npm test
 ```
 
-测试不安装任何 npm 包。浏览器测试仅将唯一、明确的 `pass` 终态视为成功；`pending`、超时、脚本错误或多个终态均失败。
+## 许可证
 
-## 兼容性边界
-
-设计兼容目标为最新版桌面 Chrome 和 Edge。真实小红书 DOM 可能因页面改版或 A/B 实验变化；本地夹具通过不等同于线上选择器已验证。
+MIT License

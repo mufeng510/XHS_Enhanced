@@ -1,8 +1,26 @@
 {
   "name": "xhs-web-enhancement",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "Zero-dependency userscript and local validation harness",
+  "description": "零依赖油猴脚本 + 本地验证工具链，为小红书网页版搜索页/用户主页增加热门笔记（点赞>100）高亮与快速跳转",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mufeng510/XHS_Enhanced.git"
+  },
+  "homepage": "https://github.com/mufeng510/XHS_Enhanced",
+  "bugs": {
+    "url": "https://github.com/mufeng510/XHS_Enhanced/issues"
+  },
+  "keywords": [
+    "userscript",
+    "tampermonkey",
+    "xiaohongshu",
+    "xhs",
+    "userscript",
+    "enhancement"
+  ],
+  "author": "mufeng510",
+  "license": "MIT",
   "scripts": {
     "check": "node scripts/static-check.cjs",
     "test:unit": "node --test --test-isolation=none tests/unit/userscript.test.cjs",

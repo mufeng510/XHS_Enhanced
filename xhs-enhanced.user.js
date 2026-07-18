@@ -1,12 +1,18 @@
 // ==UserScript==
 // @name         小红书网页版增强
-// @namespace    https://github.com/local/xhs-enhanced
+// @namespace    https://github.com/mufeng510/XHS_Enhanced
 // @version      1.1.0
-// @description  高亮热门笔记并快速跳转到下一条
+// @description  高亮热门笔记（点赞数 > 100）并快速跳转到下一条热门笔记
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
 // @grant        none
 // @run-at       document-idle
+// @homepageURL  https://github.com/mufeng510/XHS_Enhanced
+// @supportURL   https://github.com/mufeng510/XHS_Enhanced/issues
+// @updateURL    https://github.com/mufeng510/XHS_Enhanced/raw/main/xhs-enhanced.user.js
+// @downloadURL  https://github.com/mufeng510/XHS_Enhanced/raw/main/xhs-enhanced.user.js
+// @license      MIT
+// @author       mufeng510
 // ==/UserScript==
 
 (function () {
