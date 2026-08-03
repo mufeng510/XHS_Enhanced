@@ -4,6 +4,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
+const ADDITIONAL_INFO_MAX_CHARACTERS = 50000;
+
+function characterCount(content) {
+  return Array.from(content).length;
+}
+
 function load(pathname = '/real/path', testMode = true, localStorage) {
   const context = { console, location: { pathname }, __XHS_ENHANCED_TEST_MODE__: testMode };
   if (localStorage !== undefined) context.localStorage = localStorage;
@@ -36,6 +42,13 @@ test('like parser accepts only explicit supported formats', () => {
     assert(Number.isFinite(result.value) && result.value >= 0);
   }
   for (const input of ['', '赞', '--', '-1', '1万+', '1.2.3k', '100+']) assert.equal(p(input).ok, false, input);
+});
+
+test('Greasy Fork additional-info HTML stays within the character limit', () => {
+  const html = fs.readFileSync('greasyfork-additional-info.html', 'utf8');
+  assert(characterCount(html) <= ADDITIONAL_INFO_MAX_CHARACTERS);
+  assert.equal(characterCount('a'.repeat(ADDITIONAL_INFO_MAX_CHARACTERS)), ADDITIONAL_INFO_MAX_CHARACTERS);
+  assert(characterCount('a'.repeat(ADDITIONAL_INFO_MAX_CHARACTERS + 1)) > ADDITIONAL_INFO_MAX_CHARACTERS);
 });
 
 test('popular threshold accepts canonical non-negative safe integers and safely reads storage', () => {
