@@ -50,6 +50,9 @@
   function popular(node) { return node.classList.contains('xhs-enhanced-card--popular'); }
   function jumpButton() { return document.getElementById('xhs-enhanced-jump-next'); }
   function statusNode() { return document.getElementById('xhs-enhanced-jump-status'); }
+  function thresholdControl() { return document.getElementById('xhs-enhanced-threshold-control'); }
+  function thresholdInput() { return document.getElementById('xhs-enhanced-threshold-input'); }
+  function thresholdStatus() { return document.getElementById('xhs-enhanced-threshold-status'); }
   function setRect(node, top, bottom = top + 200) { node.getBoundingClientRect = () => ({ top, bottom, left: 0, right: 100, width: 100, height: bottom - top }); }
 
   addEventListener('error', event => failures.push(`window error: ${event.message}`));
@@ -78,6 +81,37 @@
     assert(popular(card('profile-fallback')), 'profile explicit count fallback');
     assert(card('profile-fallback').querySelectorAll('.xhs-enhanced-publish-time').length === 0, 'profile card has no generated time label');
     assert(!card('profile-100').querySelector('.author-stats').classList.contains('xhs-enhanced-like--popular'), 'author stats not treated as likes');
+  }
+
+  async function configurableThreshold() {
+    api.setTestRoute('/search_result');
+    await useFixture('search-source', '#search-fixture');
+    api.scan(); await checkpoint();
+    assert(thresholdControl() && thresholdControl().getAttribute('role') === 'group' && thresholdInput(), 'threshold control is present and labelled');
+    assert(document.querySelectorAll('#xhs-enhanced-threshold-control').length === 1, 'threshold control is unique');
+    thresholdInput().value = '222';
+    card('101').querySelector('[data-like-count]').setAttribute('data-like-count', '102'); await checkpoint();
+    assert(thresholdInput().value === '222', 'unsubmitted threshold input survives feed mutations');
+
+    thresholdInput().value = '200';
+    thresholdControl().querySelector('button').click(); await checkpoint();
+    assert(api.getThreshold() === 200 && !popular(card('101')), 'configured threshold applies immediately with strict boundary');
+    assert(localStorage.getItem('xhs-enhanced:popular-threshold') === '200', 'configured threshold persists locally');
+
+    api.destroy(); api.init(); await checkpoint();
+    assert(api.getThreshold() === 200 && thresholdInput().value === '200', 'stored threshold is restored before rescanning');
+
+    thresholdInput().value = '-1';
+    thresholdControl().querySelector('button').click(); await checkpoint();
+    assert(api.getThreshold() === 200 && thresholdInput().value === '200' && thresholdStatus().textContent.includes('请输入非负整数'), 'invalid threshold preserves the active value');
+    thresholdInput().value = '100';
+    thresholdInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await checkpoint();
+    assert(api.getThreshold() === 100 && popular(card('101')), 'keyboard apply restores strict 100/101 boundary');
+
+    api.setTestRoute('/explore/threshold'); await checkpoint();
+    assert(!thresholdControl() && !thresholdStatus(), 'threshold UI is removed outside supported routes');
+    api.setTestRoute('/search_result'); await checkpoint();
+    assert(document.querySelectorAll('#xhs-enhanced-threshold-control').length === 1, 'threshold UI is restored without duplication');
   }
 
   function makeCard(name, value, attribute = 'aria-label') {
@@ -284,6 +318,7 @@
       assert(Boolean(api), 'test API installed');
       await initialAndIdempotent();
       await profile();
+      await configurableThreshold();
       await dynamicAndAttributes();
       await jumpNavigation();
       await spaRootReplacement();

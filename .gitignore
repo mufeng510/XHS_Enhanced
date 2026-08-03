@@ -25,6 +25,8 @@ logs/
 *.sublime-workspace
 # OMC state (keep if you want OMC to retain its own data, but you may ignore if not needed)
 .omc/
+# OMX runtime state, logs, caches, and browser-test temporary files
+.omx/
 # Other generated files
 coverage/
 *.tsbuildinfo

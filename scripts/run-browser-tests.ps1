@@ -13,6 +13,7 @@ function Stop-XhsEnhancedBrowserProcesses {
   }
 }
 Stop-XhsEnhancedBrowserProcesses
+New-Item -ItemType Directory -Path '.omx/tmp' -Force | Out-Null
 $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
 $listener.Start(); $serverPort = ($listener.LocalEndpoint).Port; $listener.Stop()
 $serverLog = Join-Path (Resolve-Path '.omx/tmp').Path ("xhs-enhanced-server-" + [guid]::NewGuid().ToString('N') + '.log')

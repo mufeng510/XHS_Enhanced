@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.1.0
-// @description  高亮热门笔记（点赞数 > 100）并快速跳转到下一条热门笔记
+// @version      1.2.0
+// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
 // @grant        none
@@ -20,13 +20,17 @@
 
   const ROOT = globalThis;
   const TEST_MODE = ROOT.__XHS_ENHANCED_TEST_MODE__ === true;
-  const THRESHOLD = 100;
+  const DEFAULT_THRESHOLD = 100;
+  const THRESHOLD_STORAGE_KEY = 'xhs-enhanced:popular-threshold';
   const STYLE_ID = 'xhs-enhanced-style';
   const CARD_CLASS = 'xhs-enhanced-card--popular';
   const LIKE_CLASS = 'xhs-enhanced-like--popular';
   const SIGNATURE_ATTRIBUTE = 'data-xhs-enhanced-signature';
   const JUMP_BUTTON_ID = 'xhs-enhanced-jump-next';
   const JUMP_STATUS_ID = 'xhs-enhanced-jump-status';
+  const THRESHOLD_CONTROL_ID = 'xhs-enhanced-threshold-control';
+  const THRESHOLD_INPUT_ID = 'xhs-enhanced-threshold-input';
+  const THRESHOLD_STATUS_ID = 'xhs-enhanced-threshold-status';
   const JUMP_BUTTON_TEXT = '下一条热门笔记';
   const LAST_NOTE_TEXT = '已经是最后一条热门笔记';
 
@@ -51,6 +55,10 @@
   let lastUrl = '';
   let jumpButton = null;
   let jumpStatus = null;
+  let thresholdControl = null;
+  let thresholdInput = null;
+  let thresholdStatus = null;
+  let threshold = DEFAULT_THRESHOLD;
   let jumpStatusTimer = null;
   let originalPushState = null;
   let originalReplaceState = null;
@@ -62,6 +70,47 @@
 
   function normalizeSpace(value) {
     return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+  }
+
+  function parseThreshold(value) {
+    const text = String(value == null ? '' : value);
+    if (!/^(?:0|[1-9]\d*)$/.test(text)) return { ok: false };
+    const parsed = Number(text);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? { ok: true, value: parsed } : { ok: false };
+  }
+
+  function readStoredThreshold(storage = getStorage()) {
+    if (!storage) return DEFAULT_THRESHOLD;
+    try {
+      const parsed = parseThreshold(storage.getItem(THRESHOLD_STORAGE_KEY));
+      return parsed.ok ? parsed.value : DEFAULT_THRESHOLD;
+    } catch (_) {
+      return DEFAULT_THRESHOLD;
+    }
+  }
+
+  function getStorage() {
+    try {
+      return ROOT.localStorage || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function setThreshold(value, storage = getStorage()) {
+    const parsed = parseThreshold(value);
+    if (!parsed.ok) return { ok: false, value: threshold, persisted: false };
+    threshold = parsed.value;
+    let persisted = false;
+    if (storage) {
+      try {
+        storage.setItem(THRESHOLD_STORAGE_KEY, String(threshold));
+        persisted = true;
+      } catch (_) {
+        // A valid setting still applies for this page when browser storage is unavailable.
+      }
+    }
+    return { ok: true, value: threshold, persisted };
   }
 
   function parseLikeCount(input) {
@@ -150,7 +199,10 @@
       .${LIKE_CLASS}{color:#ff2442!important;font-weight:700!important}
       #${JUMP_BUTTON_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
       #${JUMP_BUTTON_ID}:hover{background:#e61e3c}#${JUMP_BUTTON_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
-      #${JUMP_STATUS_ID}{position:fixed;top:138px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
+      #${THRESHOLD_CONTROL_ID}{position:fixed;top:138px;right:24px;z-index:2147483646;display:flex;gap:6px;align-items:center;padding:8px;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.16);font:14px/1.4 system-ui,sans-serif}
+      #${THRESHOLD_INPUT_ID}{width:72px;border:1px solid #aaa;border-radius:4px;padding:5px 6px;font:inherit}#${THRESHOLD_CONTROL_ID} button{border:0;border-radius:4px;padding:6px 9px;background:#ff2442;color:#fff;font:600 13px/1 system-ui,sans-serif;cursor:pointer}
+      #${THRESHOLD_STATUS_ID}{position:fixed;top:190px;right:24px;z-index:2147483646;max-width:260px;padding:7px 10px;border-radius:6px;background:rgba(30,30,30,.92);color:#fff;font:13px/1.4 system-ui,sans-serif;pointer-events:none}
+      #${JUMP_STATUS_ID}{position:fixed;top:228px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
     `;
     (ROOT.document.head || ROOT.document.documentElement).appendChild(style);
   }
@@ -160,7 +212,7 @@
     const like = extractLike(card);
     const route = getCurrentRoute();
     const signature = signatureFor(route, like ? like.raw : '');
-    const popular = Boolean(like && like.parsed.value > THRESHOLD);
+    const popular = Boolean(like && like.parsed.value > threshold);
 
     card.classList.toggle(CARD_CLASS, popular);
     for (const stale of card.querySelectorAll(`.${LIKE_CLASS}`)) if (!like || stale !== like.node) stale.classList.remove(LIKE_CLASS);
@@ -251,6 +303,78 @@
     jumpButton = button;
   }
 
+  function showThresholdStatus(message) {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let node = thresholdStatus && thresholdStatus.isConnected ? thresholdStatus : ROOT.document.getElementById(THRESHOLD_STATUS_ID);
+    if (!node) {
+      node = ROOT.document.createElement('div');
+      node.id = THRESHOLD_STATUS_ID;
+      node.setAttribute('role', 'status');
+      node.setAttribute('aria-live', 'polite');
+      ROOT.document.body.appendChild(node);
+    }
+    node.textContent = message;
+    thresholdStatus = node;
+  }
+
+  function applyThresholdInput() {
+    if (!thresholdInput) return;
+    const result = setThreshold(thresholdInput.value);
+    thresholdInput.value = String(threshold);
+    if (!result.ok) {
+      showThresholdStatus(`请输入非负整数，当前阈值为 ${threshold}`);
+      return;
+    }
+    showThresholdStatus(result.persisted ? `热门阈值已设为 ${threshold}` : `热门阈值已设为 ${threshold}，但未能保存`);
+    scan(ROOT.document);
+  }
+
+  function ensureThresholdUi() {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let control = thresholdControl && thresholdControl.isConnected ? thresholdControl : ROOT.document.getElementById(THRESHOLD_CONTROL_ID);
+    let created = false;
+    if (!control) {
+      created = true;
+      control = ROOT.document.createElement('div');
+      control.id = THRESHOLD_CONTROL_ID;
+      control.setAttribute('role', 'group');
+      control.setAttribute('aria-label', '热门阈值设置');
+      const label = ROOT.document.createElement('label');
+      label.htmlFor = THRESHOLD_INPUT_ID;
+      label.textContent = '热门阈值';
+      const input = ROOT.document.createElement('input');
+      input.id = THRESHOLD_INPUT_ID;
+      input.type = 'text';
+      input.inputMode = 'numeric';
+      input.setAttribute('aria-label', '热门阈值');
+      const button = ROOT.document.createElement('button');
+      button.type = 'button';
+      button.textContent = '应用';
+      button.addEventListener('click', applyThresholdInput);
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+          event.returnValue = false;
+          applyThresholdInput();
+        }
+      });
+      control.append(label, input, button);
+      ROOT.document.body.appendChild(control);
+    }
+    thresholdControl = control;
+    thresholdInput = control.querySelector(`#${THRESHOLD_INPUT_ID}`);
+    if (created && thresholdInput) thresholdInput.value = String(threshold);
+  }
+
+  function removeThresholdUi() {
+    const control = thresholdControl && thresholdControl.isConnected ? thresholdControl : ROOT.document && ROOT.document.getElementById(THRESHOLD_CONTROL_ID);
+    if (control) control.remove();
+    thresholdControl = null;
+    thresholdInput = null;
+    const status = thresholdStatus && thresholdStatus.isConnected ? thresholdStatus : ROOT.document && ROOT.document.getElementById(THRESHOLD_STATUS_ID);
+    if (status) status.remove();
+    thresholdStatus = null;
+  }
+
   function removeJumpUi() {
     clearJumpStatus();
     const button = jumpButton && jumpButton.isConnected ? jumpButton : ROOT.document && ROOT.document.getElementById(JUMP_BUTTON_ID);
@@ -262,8 +386,13 @@
   }
 
   function syncJumpUi() {
-    if (isTargetRoute(getCurrentRoute())) ensureJumpUi();
-    else removeJumpUi();
+    if (isTargetRoute(getCurrentRoute())) {
+      ensureJumpUi();
+      ensureThresholdUi();
+    } else {
+      removeJumpUi();
+      removeThresholdUi();
+    }
   }
 
   function flush() {
@@ -402,6 +531,7 @@
     initialized = true;
     lifecycleToken = { active: true };
     destroyed = false;
+    threshold = readStoredThreshold();
     ensureStyle();
     bindObserverRoot(selectObserverRoot());
     if (ROOT.document.documentElement && typeof ROOT.MutationObserver === 'function') {
@@ -433,13 +563,14 @@
     for (const [target, type, handler] of eventBindings.splice(0)) target.removeEventListener(type, handler);
     restoreHistorySignals();
     removeJumpUi();
+    removeThresholdUi();
     cleanupAll();
     const style = ROOT.document && ROOT.document.getElementById(STYLE_ID);
     if (style) style.remove();
   }
 
   const pureApi = Object.freeze({
-    parseLikeCount, isTargetRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
+    parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
     READ_ATTRIBUTES, SELECTORS
   });
 
@@ -447,7 +578,7 @@
     ROOT.__XHS_ENHANCED_TEST_API__ = Object.assign({}, pureApi, {
       setTestRoute(pathname, scheduleChange = true) { routeProvider = () => String(pathname || ''); lastUrl = ''; if (scheduleChange) schedule(ROOT.document); },
       clearTestRoute() { routeProvider = null; lastUrl = ''; schedule(ROOT.document); },
-      scan: () => scan(ROOT.document), flush, init, destroy,
+      scan: () => scan(ROOT.document), flush, init, destroy, setThreshold: value => setThreshold(value), getThreshold: () => threshold,
       getCounters: () => Object.assign({}, counters, { bindings: eventBindings.length, ownedHistoryWrappers: Number(Boolean(ownedPushState)) + Number(Boolean(ownedReplaceState)), observerRootIsBody: observerRoot === ROOT.document.body })
     });
   }

@@ -4,8 +4,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-function load(pathname = '/real/path', testMode = true) {
+function load(pathname = '/real/path', testMode = true, localStorage) {
   const context = { console, location: { pathname }, __XHS_ENHANCED_TEST_MODE__: testMode };
+  if (localStorage !== undefined) context.localStorage = localStorage;
   context.globalThis = context;
   vm.runInNewContext(fs.readFileSync('xhs-enhanced.user.js', 'utf8'), context);
   return context;
@@ -35,6 +36,35 @@ test('like parser accepts only explicit supported formats', () => {
     assert(Number.isFinite(result.value) && result.value >= 0);
   }
   for (const input of ['', '赞', '--', '-1', '1万+', '1.2.3k', '100+']) assert.equal(p(input).ok, false, input);
+});
+
+test('popular threshold accepts canonical non-negative safe integers and safely reads storage', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  for (const value of ['0', '100', '9007199254740991']) {
+    const parsed = api.parseThreshold(value);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.value, Number(value));
+  }
+  for (const value of ['', '01', '-1', '1.5', '1e3', '9007199254740992', null]) assert.equal(api.parseThreshold(value).ok, false, String(value));
+
+  const stored = { getItem: key => key === 'xhs-enhanced:popular-threshold' ? '321' : null };
+  assert.equal(api.readStoredThreshold(stored), 321);
+  for (const value of [null, 'bad', '-1', '1.5', '9007199254740992']) assert.equal(api.readStoredThreshold({ getItem: () => value }), 100, String(value));
+  assert.equal(api.readStoredThreshold({ getItem() { throw new Error('blocked'); } }), 100);
+});
+
+test('valid threshold updates runtime state even when persistence fails', () => {
+  const saved = [];
+  const api = load('/search_result', true, { getItem: () => '250', setItem: (key, value) => saved.push([key, value]) }).__XHS_ENHANCED_TEST_API__;
+  let result = api.setThreshold('300');
+  assert.equal(result.ok, true); assert.equal(result.value, 300); assert.equal(result.persisted, true);
+  assert.deepEqual(saved, [['xhs-enhanced:popular-threshold', '300']]);
+  result = api.setThreshold('3.5');
+  assert.equal(result.ok, false); assert.equal(result.value, 300); assert.equal(result.persisted, false);
+  const failing = load('/search_result', true, { getItem: () => '100', setItem() { throw new Error('blocked'); } }).__XHS_ENHANCED_TEST_API__;
+  result = failing.setThreshold('301');
+  assert.equal(result.ok, true); assert.equal(result.value, 301); assert.equal(result.persisted, false);
+  assert.equal(failing.getThreshold(), 301);
 });
 
 test('signature is deterministic and changes with each material input', () => {
