@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.2.0
-// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转
+// @version      1.3.0
+// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；用户主页每个笔记卡片支持复制链接与封面
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
 // @grant        none
@@ -33,6 +33,19 @@
   const THRESHOLD_STATUS_ID = 'xhs-enhanced-threshold-status';
   const JUMP_BUTTON_TEXT = '下一条热门笔记';
   const LAST_NOTE_TEXT = '已经是最后一条热门笔记';
+  const CARD_ACTIONS_CLASS = 'xhs-enhanced-card-actions';
+  const COPY_LINK_CLASS = 'xhs-enhanced-copy-link';
+  const COPY_COVER_CLASS = 'xhs-enhanced-copy-cover';
+  const CARD_ACTIONS_ATTRIBUTE = 'data-xhs-enhanced-actions';
+  const COPY_LINK_TEXT = '复制链接';
+  const COPY_COVER_TEXT = '复制封面';
+  const COPY_LINK_OK = '已复制笔记链接';
+  const COPY_LINK_FAIL = '链接复制失败';
+  const COPY_COVER_OK = '已复制笔记封面';
+  const COPY_COVER_FAIL = '封面复制失败';
+  const COVER_IMAGE_SELECTORS = 'img.cover,img[src*="sns-img"],img[src*="xhscdn"],picture img,article img,section.note-item img,.note-item img';
+  const COPY_STATUS_ID = 'xhs-enhanced-copy-status';
+  const SHARE_BASE = 'https://www.xiaohongshu.com/';
 
   const SELECTORS = Object.freeze({
     noteLinks: 'a[href*="/explore/"],a[href*="/discovery/item/"]',
@@ -60,6 +73,8 @@
   let thresholdStatus = null;
   let threshold = DEFAULT_THRESHOLD;
   let jumpStatusTimer = null;
+  let copyStatus = null;
+  let copyStatusTimer = null;
   let originalPushState = null;
   let originalReplaceState = null;
   let ownedPushState = null;
@@ -134,6 +149,177 @@
     return path === '/search_result' || path.startsWith('/user/profile/');
   }
 
+  function isProfileRoute(pathname) {
+    const path = String(pathname || '').split('?')[0];
+    return path.startsWith('/user/profile/');
+  }
+
+  function getNoteIdFromHref(href) {
+    const text = String(href == null ? '' : href);
+    if (!text) return '';
+    const match = text.match(/\/(?:explore|discovery\/item)\/([A-Za-z0-9]+)/);
+    return match ? match[1] : '';
+  }
+
+  function extractNoteLink(card) {
+    if (!card || !card.querySelector) return '';
+    const link = card.querySelector(SELECTORS.noteLinks);
+    if (!link) return '';
+    const href = link.getAttribute('href') || '';
+    const id = getNoteIdFromHref(href);
+    if (!id) return '';
+    return SHARE_BASE + 'discovery/item/' + id;
+  }
+
+  function extractCoverUrl(card) {
+    if (!card || !card.querySelector) return '';
+    const img = card.querySelector(COVER_IMAGE_SELECTORS);
+    if (!img) return '';
+    const src = img.getAttribute('src') || img.currentSrc || '';
+    return normalizeSpace(src);
+  }
+
+  function clearCopyStatus() {
+    if (copyStatusTimer !== null) ROOT.clearTimeout(copyStatusTimer);
+    copyStatusTimer = null;
+    const node = copyStatus && copyStatus.isConnected ? copyStatus : ROOT.document && ROOT.document.getElementById(COPY_STATUS_ID);
+    if (node) node.remove();
+    copyStatus = null;
+  }
+
+  function showCopyStatus(message) {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let node = copyStatus && copyStatus.isConnected ? copyStatus : ROOT.document.getElementById(COPY_STATUS_ID);
+    if (!node) {
+      node = ROOT.document.createElement('div');
+      node.id = COPY_STATUS_ID;
+      node.setAttribute('role', 'status');
+      node.setAttribute('aria-live', 'polite');
+      ROOT.document.body.appendChild(node);
+    }
+    copyStatus = node;
+    node.textContent = message;
+    if (copyStatusTimer !== null) ROOT.clearTimeout(copyStatusTimer);
+    copyStatusTimer = ROOT.setTimeout(() => { copyStatusTimer = null; clearCopyStatus(); }, 2200);
+  }
+
+  function copyText(text) {
+    if (!ROOT.navigator || !ROOT.navigator.clipboard || typeof ROOT.navigator.clipboard.writeText !== 'function') {
+      return Promise.resolve(false);
+    }
+    return ROOT.navigator.clipboard.writeText(text).then(() => true, () => false);
+  }
+
+  function copyImage(dataUrl, mimeType) {
+    if (!ROOT.navigator || !ROOT.navigator.clipboard || typeof ROOT.navigator.ClipboardItem !== 'function') {
+      return Promise.resolve(false);
+    }
+    try {
+      const blob = dataUrlToBlob(dataUrl, mimeType);
+      if (!blob) return Promise.resolve(false);
+      const item = new ROOT.navigator.ClipboardItem({ [blob.type]: blob });
+      return ROOT.navigator.clipboard.write([item]).then(() => true, () => false);
+    } catch (_) {
+      return Promise.resolve(false);
+    }
+  }
+
+  function dataUrlToBlob(dataUrl, mimeType) {
+    if (!dataUrl) return null;
+    if (!/^data:/.test(dataUrl)) return null;
+    const comma = dataUrl.indexOf(',');
+    if (comma < 0) return null;
+    const header = dataUrl.slice(0, comma);
+    const body = dataUrl.slice(comma + 1);
+    const typeMatch = header.match(/^data:([^;,]*)/);
+    const type = (typeMatch && typeMatch[1]) || mimeType || 'application/octet-stream';
+    try {
+      const text = ROOT.atob ? ROOT.atob(body) : body;
+      const length = text.length;
+      const bytes = new Array(length);
+      for (let i = 0; i < length; i += 1) bytes[i] = text.charCodeAt(i) & 0xff;
+      return new ROOT.Blob(bytes, { type });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function onCopyLink(card) {
+    const link = extractNoteLink(card);
+    if (!link) { showCopyStatus(COPY_LINK_FAIL); return; }
+    copyText(link).then(ok => showCopyStatus(ok ? COPY_LINK_OK : COPY_LINK_FAIL));
+  }
+
+  function onCopyCover(card) {
+    const src = extractCoverUrl(card);
+    if (!src) { showCopyStatus(COPY_COVER_FAIL); return; }
+    loadCoverDataUrl(src).then(({ ok, dataUrl, mimeType }) => {
+      if (!ok || !dataUrl) { showCopyStatus(COPY_COVER_FAIL); return; }
+      copyImage(dataUrl, mimeType).then(copied => showCopyStatus(copied ? COPY_COVER_OK : COPY_COVER_FAIL));
+    });
+  }
+
+  function loadCoverDataUrl(src) {
+    return new Promise(resolve => {
+      try {
+        if (typeof ROOT.Image !== 'function') { resolve({ ok: false }); return; }
+        const img = new ROOT.Image();
+        const mimeType = /^data:/.test(src) ? (src.match(/^data:([^;,]*)/) || [])[1] || 'image/png' : 'image/png';
+        img.onload = () => {
+          try {
+            const canvas = ROOT.document.createElement('canvas');
+            if (!canvas || typeof canvas.getContext !== 'function') { resolve({ ok: false }); return; }
+            canvas.width = img.naturalWidth || img.width || 0;
+            canvas.height = img.naturalHeight || img.height || 0;
+            if (!canvas.width || !canvas.height) { resolve({ ok: false }); return; }
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            const dataUrl = canvas.toDataURL(mimeType);
+            resolve({ ok: true, dataUrl, mimeType });
+          } catch (_) { resolve({ ok: false }); }
+        };
+        img.onerror = () => resolve({ ok: false });
+        img.crossOrigin = 'anonymous';
+        img.src = src;
+      } catch (_) { resolve({ ok: false }); }
+    });
+  }
+
+  function ensureCardActions(card) {
+    if (!card || !card.querySelector || !card.isConnected) return;
+    if (!isProfileRoute(getCurrentRoute())) {
+      removeCardActions(card);
+      return;
+    }
+    let container = card.querySelector('.' + CARD_ACTIONS_CLASS);
+    if (!container) {
+      container = ROOT.document.createElement('div');
+      container.className = CARD_ACTIONS_CLASS;
+      const linkButton = ROOT.document.createElement('button');
+      linkButton.type = 'button';
+      linkButton.className = COPY_LINK_CLASS;
+      linkButton.textContent = COPY_LINK_TEXT;
+      linkButton.setAttribute('aria-label', COPY_LINK_TEXT);
+      linkButton.addEventListener('click', () => onCopyLink(card));
+      const coverButton = ROOT.document.createElement('button');
+      coverButton.type = 'button';
+      coverButton.className = COPY_COVER_CLASS;
+      coverButton.textContent = COPY_COVER_TEXT;
+      coverButton.setAttribute('aria-label', COPY_COVER_TEXT);
+      coverButton.addEventListener('click', () => onCopyCover(card));
+      container.append(linkButton, coverButton);
+      card.appendChild(container);
+    }
+    card.setAttribute(CARD_ACTIONS_ATTRIBUTE, getCurrentRoute());
+  }
+
+  function removeCardActions(card) {
+    if (!card || !card.querySelectorAll) return;
+    const container = card.querySelector('.' + CARD_ACTIONS_CLASS);
+    if (container) container.remove();
+    card.removeAttribute(CARD_ACTIONS_ATTRIBUTE);
+  }
+
   function getCurrentRoute() {
     if (TEST_MODE && routeProvider) return String(routeProvider() || '');
     return ROOT.location ? ROOT.location.pathname : '';
@@ -186,6 +372,23 @@
     return Array.from(cards);
   }
 
+  function discoverLinkCards(root) {
+    if (!root || !root.querySelectorAll) return [];
+    const cards = new Set();
+    for (const link of root.querySelectorAll(SELECTORS.noteLinks)) {
+      const element = link.nodeType === 1 ? link : link.parentElement;
+      if (!element) continue;
+      const card = element.closest(SELECTORS.cardContainers);
+      if (card && card.isConnected && card.querySelectorAll(SELECTORS.noteLinks).length === 1) cards.add(card);
+    }
+    return Array.from(cards);
+  }
+
+  function applyProfileActions() {
+    if (!ROOT.document || !isProfileRoute(getCurrentRoute())) return;
+    for (const card of discoverLinkCards(ROOT.document)) ensureCardActions(card);
+  }
+
   function signatureFor(route, likeRaw) {
     return `${route}\u001f${likeRaw || ''}`;
   }
@@ -203,6 +406,13 @@
       #${THRESHOLD_INPUT_ID}{width:72px;border:1px solid #aaa;border-radius:4px;padding:5px 6px;font:inherit}#${THRESHOLD_CONTROL_ID} button{border:0;border-radius:4px;padding:6px 9px;background:#ff2442;color:#fff;font:600 13px/1 system-ui,sans-serif;cursor:pointer}
       #${THRESHOLD_STATUS_ID}{position:fixed;top:190px;right:24px;z-index:2147483646;max-width:260px;padding:7px 10px;border-radius:6px;background:rgba(30,30,30,.92);color:#fff;font:13px/1.4 system-ui,sans-serif;pointer-events:none}
       #${JUMP_STATUS_ID}{position:fixed;top:228px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
+      #${COPY_STATUS_ID}{position:fixed;top:276px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
+      .${CARD_ACTIONS_CLASS}{position:absolute;top:6px;left:6px;z-index:2147483640;display:flex;gap:4px;opacity:0;transition:opacity .15s ease;pointer-events:none}
+      .xhs-enhanced-card--popular .${CARD_ACTIONS_CLASS},.note-item:hover .${CARD_ACTIONS_CLASS},section.note-item:hover .${CARD_ACTIONS_CLASS},article.note-item:hover .${CARD_ACTIONS_CLASS}{opacity:1;pointer-events:auto}
+      [data-note-card],article.note-item,section.note-item,.note-item{position:relative}
+      .${CARD_ACTIONS_CLASS} button{border:0;border-radius:6px;padding:5px 9px;background:rgba(255,36,66,.92);color:#fff;font:600 12px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.18)}
+      .${CARD_ACTIONS_CLASS} button:hover{background:#e61e3c}
+      .${COPY_COVER_CLASS}{background:rgba(30,30,30,.82)!important}
     `;
     (ROOT.document.head || ROOT.document.documentElement).appendChild(style);
   }
@@ -219,6 +429,7 @@
     if (like) like.node.classList.toggle(LIKE_CLASS, popular);
 
     card.setAttribute(SIGNATURE_ATTRIBUTE, signature);
+    ensureCardActions(card);
     counters.processed += 1;
   }
 
@@ -226,12 +437,14 @@
     if (!card || !card.querySelectorAll) return;
     card.classList.remove(CARD_CLASS);
     card.removeAttribute(SIGNATURE_ATTRIBUTE);
+    removeCardActions(card);
     for (const node of card.querySelectorAll(`.${LIKE_CLASS}`)) node.classList.remove(LIKE_CLASS);
   }
 
   function cleanupAll() {
     if (!ROOT.document) return;
     for (const card of ROOT.document.querySelectorAll(`.${CARD_CLASS},[${SIGNATURE_ATTRIBUTE}]`)) cleanupCard(card);
+    for (const container of ROOT.document.querySelectorAll('.' + CARD_ACTIONS_CLASS)) container.remove();
   }
 
   function selectNextPopularCard(cards, viewportHeight) {
@@ -417,6 +630,7 @@
       const card = findCard(candidate) || (isReliableCard(candidate) ? candidate : null);
       if (card) renderCard(card);
     }
+    applyProfileActions();
   }
 
   function schedule(root) {
@@ -564,13 +778,15 @@
     restoreHistorySignals();
     removeJumpUi();
     removeThresholdUi();
+    clearCopyStatus();
     cleanupAll();
     const style = ROOT.document && ROOT.document.getElementById(STYLE_ID);
     if (style) style.remove();
   }
 
   const pureApi = Object.freeze({
-    parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
+    parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, isProfileRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
+    getNoteIdFromHref, extractNoteLink, extractCoverUrl,
     READ_ATTRIBUTES, SELECTORS
   });
 

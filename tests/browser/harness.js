@@ -81,6 +81,18 @@
     assert(popular(card('profile-fallback')), 'profile explicit count fallback');
     assert(card('profile-fallback').querySelectorAll('.xhs-enhanced-publish-time').length === 0, 'profile card has no generated time label');
     assert(!card('profile-100').querySelector('.author-stats').classList.contains('xhs-enhanced-like--popular'), 'author stats not treated as likes');
+    for (const name of ['profile-100', 'profile-101', 'profile-fallback']) {
+      const node = card(name);
+      const container = node.querySelector('.xhs-enhanced-card-actions');
+      assert(Boolean(container), `profile card has copy actions container: ${name}`);
+      assert(container.querySelector('.xhs-enhanced-copy-link').textContent === '复制链接', `profile card copy-link button label: ${name}`);
+      assert(container.querySelector('.xhs-enhanced-copy-cover').textContent === '复制封面', `profile card copy-cover button label: ${name}`);
+    }
+    const searchCard = card('profile-100');
+    api.setTestRoute('/search_result'); await checkpoint();
+    assert(!searchCard.querySelector('.xhs-enhanced-card-actions'), 'leaving profile route removes copy actions from existing cards');
+    api.setTestRoute('/user/profile/abc'); await checkpoint();
+    assert(Boolean(searchCard.querySelector('.xhs-enhanced-card-actions')), 'returning to profile route restores copy actions');
   }
 
   async function configurableThreshold() {

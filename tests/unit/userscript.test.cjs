@@ -88,6 +88,21 @@ test('signature is deterministic and changes with each material input', () => {
   assert.notEqual(s('/search_result', '102'), base);
 });
 
+test('profile route predicate and note id extraction for copy features', () => {
+  const api = load('/user/profile/abc').__XHS_ENHANCED_TEST_API__;
+  assert.equal(api.isProfileRoute('/user/profile/abc'), true);
+  assert.equal(api.isProfileRoute('/user/profile/abc?tab=notes'), true);
+  assert.equal(api.isProfileRoute('/search_result'), false);
+  assert.equal(api.isProfileRoute('/explore/abc'), false);
+  const get = api.getNoteIdFromHref;
+  assert.equal(get('/explore/abc123'), 'abc123');
+  assert.equal(get('/discovery/item/abc123'), 'abc123');
+  assert.equal(get('https://www.xiaohongshu.com/explore/abc123?xsec_token=t'), 'abc123');
+  assert.equal(get('/not_a_note'), '');
+  assert.equal(get(''), '');
+  assert.equal(get(null), '');
+});
+
 test('next popular card selection skips viewport and chooses nearest without mutation', () => {
   const select = load().__XHS_ENHANCED_TEST_API__.selectNextPopularCard;
   function candidate(top, { connected = true, popular = true } = {}) {
