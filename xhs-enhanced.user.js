@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.3.0
-// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；用户主页每个笔记卡片支持复制链接与封面
+// @version      1.3.1
+// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；用户主页每个笔记卡片支持复制链接（explore 格式含 xsec_token）与封面
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
 // @grant        none
@@ -46,6 +46,9 @@
   const COVER_IMAGE_SELECTORS = 'img.cover,img[src*="sns-img"],img[src*="xhscdn"],picture img,article img,section.note-item img,.note-item img';
   const COPY_STATUS_ID = 'xhs-enhanced-copy-status';
   const SHARE_BASE = 'https://www.xiaohongshu.com/';
+  const XSEC_TOKEN_QUERY = 'xsec_token';
+  const XSEC_SOURCE_VALUE = 'pc_feed';
+  const INITIAL_STATE_TOKEN_PATTERN = /"xsec_token"\s*:\s*"([^"]+)"/;
 
   const SELECTORS = Object.freeze({
     noteLinks: 'a[href*="/explore/"],a[href*="/discovery/item/"]',
@@ -75,6 +78,8 @@
   let jumpStatusTimer = null;
   let copyStatus = null;
   let copyStatusTimer = null;
+  let fallbackXsecToken = '';
+  let fallbackTokenChecked = false;
   let originalPushState = null;
   let originalReplaceState = null;
   let ownedPushState = null;
@@ -161,14 +166,57 @@
     return match ? match[1] : '';
   }
 
+  function parseQueryValue(query, key) {
+    if (!query || !key) return '';
+    const text = String(query);
+    const match = text.match(new RegExp('[?&]' + key + '=([^&\\s#]+)'));
+    return match ? decodeURIComponent(match[1].replace(/\+/g, ' ')) : '';
+  }
+
+  function getXsecTokenFromHref(href) {
+    const text = String(href == null ? '' : href);
+    return parseQueryValue(text, XSEC_TOKEN_QUERY);
+  }
+
+  function getFallbackXsecToken() {
+    if (fallbackTokenChecked) return fallbackXsecToken;
+    fallbackTokenChecked = true;
+    fallbackXsecToken = '';
+    const doc = ROOT.document;
+    if (!doc || !doc.querySelectorAll) return '';
+    try {
+      const scripts = doc.querySelectorAll('script:not([src])');
+      let found = '';
+      for (const script of scripts) {
+        const content = script.textContent || '';
+        if (content.indexOf('__INITIAL_STATE__') < 0 && content.indexOf('xsec_token') < 0) continue;
+        const match = content.match(INITIAL_STATE_TOKEN_PATTERN);
+        if (match && match[1]) { found = match[1]; break; }
+      }
+      fallbackXsecToken = found;
+    } catch (_) {
+      fallbackXsecToken = '';
+    }
+    return fallbackXsecToken;
+  }
+
+  function buildShareLink(id, token) {
+    if (!id) return '';
+    const link = SHARE_BASE + 'explore/' + id;
+    if (token) return link + '?' + XSEC_TOKEN_QUERY + '=' + encodeURIComponent(token) + '&xsec_source=' + XSEC_SOURCE_VALUE;
+    return link;
+  }
+
   function extractNoteLink(card) {
     if (!card || !card.querySelector) return '';
     const link = card.querySelector(SELECTORS.noteLinks);
     if (!link) return '';
-    const href = link.getAttribute('href') || '';
+    const href = link.getAttribute('href') || link.getAttribute('xhs:href') || '';
     const id = getNoteIdFromHref(href);
     if (!id) return '';
-    return SHARE_BASE + 'discovery/item/' + id;
+    let token = getXsecTokenFromHref(href);
+    if (!token) token = getFallbackXsecToken();
+    return buildShareLink(id, token);
   }
 
   function extractCoverUrl(card) {
@@ -704,6 +752,8 @@
     if (destroyed) return;
     counters.routeSignals += 1;
     lastUrl = '';
+    fallbackXsecToken = '';
+    fallbackTokenChecked = false;
     scan(ROOT.document);
     schedule();
   }
@@ -769,6 +819,8 @@
     destroyed = true;
     scheduled = false;
     pending.clear();
+    fallbackXsecToken = '';
+    fallbackTokenChecked = false;
     if (observer) observer.disconnect();
     observer = null;
     observerRoot = null;
@@ -786,7 +838,7 @@
 
   const pureApi = Object.freeze({
     parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, isProfileRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
-    getNoteIdFromHref, extractNoteLink, extractCoverUrl,
+    getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue,
     READ_ATTRIBUTES, SELECTORS
   });
 

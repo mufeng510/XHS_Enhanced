@@ -89,6 +89,17 @@
       assert(container.querySelector('.xhs-enhanced-copy-cover').textContent === '复制封面', `profile card copy-cover button label: ${name}`);
     }
     const searchCard = card('profile-100');
+    const originalWriteText = navigator.clipboard && navigator.clipboard.writeText;
+    const copied = [];
+    if (navigator.clipboard) navigator.clipboard.writeText = v => { copied.push(String(v)); return Promise.resolve(); };
+    try {
+      card('profile-101').querySelector('.xhs-enhanced-copy-link').click(); await checkpoint();
+      assert(copied[copied.length - 1] === 'https://www.xiaohongshu.com/explore/p2?xsec_token=hrefTokenP2&xsec_source=pc_feed', 'copy link builds explore format with xsec_token from href');
+      card('profile-100').querySelector('.xhs-enhanced-copy-link').click(); await checkpoint();
+      assert(copied[copied.length - 1] === 'https://www.xiaohongshu.com/explore/p1', 'copy link falls back to bare explore link when token unavailable');
+    } finally {
+      if (navigator.clipboard) navigator.clipboard.writeText = originalWriteText;
+    }
     api.setTestRoute('/search_result'); await checkpoint();
     assert(!searchCard.querySelector('.xhs-enhanced-card-actions'), 'leaving profile route removes copy actions from existing cards');
     api.setTestRoute('/user/profile/abc'); await checkpoint();

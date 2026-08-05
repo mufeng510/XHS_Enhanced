@@ -103,6 +103,18 @@ test('profile route predicate and note id extraction for copy features', () => {
   assert.equal(get(null), '');
 });
 
+test('share link uses explore format with xsec_token and xsec_source=pc_feed', () => {
+  const api = load('/user/profile/abc').__XHS_ENHANCED_TEST_API__;
+  assert.equal(api.buildShareLink('abc123', 'tok'), 'https://www.xiaohongshu.com/explore/abc123?xsec_token=tok&xsec_source=pc_feed');
+  assert.equal(api.buildShareLink('abc123', ''), 'https://www.xiaohongshu.com/explore/abc123');
+  assert.equal(api.buildShareLink('', 'tok'), '');
+  assert.equal(api.getXsecTokenFromHref('/explore/abc?xsec_token=abcDef123&xsec_source=pc_feed'), 'abcDef123');
+  assert.equal(api.getXsecTokenFromHref('https://www.xiaohongshu.com/explore/abc?xsec_token=abc%20Def'), 'abc Def');
+  assert.equal(api.getXsecTokenFromHref('/discovery/item/abc'), '');
+  assert.equal(api.parseQueryValue('?xsec_token=tok&xsec_source=pc_feed', 'xsec_token'), 'tok');
+  assert.equal(api.parseQueryValue('', 'xsec_token'), '');
+});
+
 test('next popular card selection skips viewport and chooses nearest without mutation', () => {
   const select = load().__XHS_ENHANCED_TEST_API__.selectNextPopularCard;
   function candidate(top, { connected = true, popular = true } = {}) {
