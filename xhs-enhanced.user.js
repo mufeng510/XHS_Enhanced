@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.3.1
+// @version      1.3.2
 // @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；用户主页每个笔记卡片支持复制链接（explore 格式含 xsec_token）与封面
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
@@ -48,7 +48,12 @@
   const SHARE_BASE = 'https://www.xiaohongshu.com/';
   const XSEC_TOKEN_QUERY = 'xsec_token';
   const XSEC_SOURCE_VALUE = 'pc_feed';
-  const INITIAL_STATE_TOKEN_PATTERN = /"xsec_token"\s*:\s*"([^"]+)"/;
+  const NOTE_ID_PATTERN = /\/(?:explore|discovery\/item)\/([A-Za-z0-9]+)/;
+  // Real __INITIAL_STATE__ uses camelCase xsecToken; noteCard often has noteId next to xsecToken.
+  const NOTE_ID_THEN_TOKEN_PATTERN = /"noteId"\s*:\s*"([0-9a-fA-F]+)"\s*,\s*"xsecToken"\s*:\s*"([^"]+)"/g;
+  const TOKEN_THEN_NOTE_ID_PATTERN = /"xsecToken"\s*:\s*"([^"]+)"(?:(?!"xsecToken"\s*:)[\s\S]){0,1200}?"noteId"\s*:\s*"([0-9a-fA-F]+)"/g;
+  const OUTER_ENTRY_TOKEN_PATTERN = /"id"\s*:\s*"([0-9a-fA-F]+)"(?:(?!"id"\s*:\s*")[\s\S]){0,4000}?"ssrRendered"\s*:\s*(?:true|false)\s*,\s*"xsecToken"\s*:\s*"([^"]+)"/g;
+  const STATE_NOTES_PATTERN = /"notes"\s*:\s*\[/;
 
   const SELECTORS = Object.freeze({
     noteLinks: 'a[href*="/explore/"],a[href*="/discovery/item/"]',
@@ -78,7 +83,7 @@
   let jumpStatusTimer = null;
   let copyStatus = null;
   let copyStatusTimer = null;
-  let fallbackXsecToken = '';
+  let fallbackTokenMap = null;
   let fallbackTokenChecked = false;
   let originalPushState = null;
   let originalReplaceState = null;
@@ -162,7 +167,7 @@
   function getNoteIdFromHref(href) {
     const text = String(href == null ? '' : href);
     if (!text) return '';
-    const match = text.match(/\/(?:explore|discovery\/item)\/([A-Za-z0-9]+)/);
+    const match = text.match(NOTE_ID_PATTERN);
     return match ? match[1] : '';
   }
 
@@ -178,26 +183,76 @@
     return parseQueryValue(text, XSEC_TOKEN_QUERY);
   }
 
-  function getFallbackXsecToken() {
-    if (fallbackTokenChecked) return fallbackXsecToken;
-    fallbackTokenChecked = true;
-    fallbackXsecToken = '';
+  function collectTokensFromStateObject(value, map, depth) {
+    if (!value || depth > 14) return;
+    if (Array.isArray(value)) {
+      for (const item of value) collectTokensFromStateObject(item, map, depth + 1);
+      return;
+    }
+    if (typeof value !== 'object') return;
+    const id = typeof value.id === 'string' ? value.id
+      : typeof value.noteId === 'string' ? value.noteId
+        : '';
+    const token = typeof value.xsecToken === 'string' ? value.xsecToken : '';
+    if (id && token && !map[id]) map[id] = token;
+    for (const key of Object.keys(value)) collectTokensFromStateObject(value[key], map, depth + 1);
+  }
+
+  function extractTokensFromState(content) {
+    const map = Object.create(null);
+    const text = String(content == null ? '' : content);
+    if (!text) return map;
+    let match;
+    NOTE_ID_THEN_TOKEN_PATTERN.lastIndex = 0;
+    while ((match = NOTE_ID_THEN_TOKEN_PATTERN.exec(text)) !== null) {
+      if (match[1] && match[2] && !map[match[1]]) map[match[1]] = match[2];
+    }
+    TOKEN_THEN_NOTE_ID_PATTERN.lastIndex = 0;
+    while ((match = TOKEN_THEN_NOTE_ID_PATTERN.exec(text)) !== null) {
+      if (match[2] && match[1] && !map[match[2]]) map[match[2]] = match[1];
+    }
+    OUTER_ENTRY_TOKEN_PATTERN.lastIndex = 0;
+    while ((match = OUTER_ENTRY_TOKEN_PATTERN.exec(text)) !== null) {
+      if (match[1] && match[2] && !map[match[1]]) map[match[1]] = match[2];
+    }
+    return map;
+  }
+
+  function buildFallbackTokenMap() {
+    const map = Object.create(null);
+    try {
+      if (ROOT.__INITIAL_STATE__) collectTokensFromStateObject(ROOT.__INITIAL_STATE__, map, 0);
+    } catch (_) {
+      // fall through to script text
+    }
+    if (Object.keys(map).length) return map;
     const doc = ROOT.document;
-    if (!doc || !doc.querySelectorAll) return '';
+    if (!doc || !doc.querySelectorAll) return map;
     try {
       const scripts = doc.querySelectorAll('script:not([src])');
-      let found = '';
       for (const script of scripts) {
         const content = script.textContent || '';
-        if (content.indexOf('__INITIAL_STATE__') < 0 && content.indexOf('xsec_token') < 0) continue;
-        const match = content.match(INITIAL_STATE_TOKEN_PATTERN);
-        if (match && match[1]) { found = match[1]; break; }
+        if (content.indexOf('__INITIAL_STATE__') < 0) continue;
+        if (!STATE_NOTES_PATTERN.test(content) && content.indexOf('xsecToken') < 0) continue;
+        const found = extractTokensFromState(content);
+        for (const key of Object.keys(found)) {
+          if (!map[key]) map[key] = found[key];
+        }
+        if (Object.keys(map).length) break;
       }
-      fallbackXsecToken = found;
     } catch (_) {
-      fallbackXsecToken = '';
+      // ignore: callers fall back to a token-less link
     }
-    return fallbackXsecToken;
+    return map;
+  }
+
+  function getFallbackTokenForNoteId(noteId) {
+    if (!noteId) return '';
+    if (fallbackTokenMap && fallbackTokenMap[noteId]) return fallbackTokenMap[noteId];
+    // Rebuild on miss so infinite-scroll notes that arrive after the first parse still resolve.
+    fallbackTokenMap = buildFallbackTokenMap();
+    fallbackTokenChecked = true;
+    return fallbackTokenMap[noteId] || '';
   }
 
   function buildShareLink(id, token) {
@@ -215,7 +270,7 @@
     const id = getNoteIdFromHref(href);
     if (!id) return '';
     let token = getXsecTokenFromHref(href);
-    if (!token) token = getFallbackXsecToken();
+    if (!token) token = getFallbackTokenForNoteId(id);
     return buildShareLink(id, token);
   }
 
@@ -752,7 +807,7 @@
     if (destroyed) return;
     counters.routeSignals += 1;
     lastUrl = '';
-    fallbackXsecToken = '';
+    fallbackTokenMap = null;
     fallbackTokenChecked = false;
     scan(ROOT.document);
     schedule();
@@ -819,7 +874,7 @@
     destroyed = true;
     scheduled = false;
     pending.clear();
-    fallbackXsecToken = '';
+    fallbackTokenMap = null;
     fallbackTokenChecked = false;
     if (observer) observer.disconnect();
     observer = null;
@@ -838,7 +893,7 @@
 
   const pureApi = Object.freeze({
     parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, isProfileRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
-    getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue,
+    getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue, extractTokensFromState,
     READ_ATTRIBUTES, SELECTORS
   });
 

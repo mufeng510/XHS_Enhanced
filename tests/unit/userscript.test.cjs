@@ -115,6 +115,51 @@ test('share link uses explore format with xsec_token and xsec_source=pc_feed', (
   assert.equal(api.parseQueryValue('', 'xsec_token'), '');
 });
 
+test('extractTokensFromState reads camelCase xsecToken from real profile note shape', () => {
+  const api = load('/user/profile/abc').__XHS_ENHANCED_TEST_API__;
+  // Mirrors real window.__INITIAL_STATE__ user.notes entries: noteCard.noteId + noteCard.xsecToken,
+  // plus outer entry id + outer xsecToken. Snake_case xsec_token must NOT be required.
+  const snippet = JSON.stringify({
+    user: {
+      notes: [[
+        {
+          id: '69952afa000000001b01e949',
+          noteCard: {
+            noteId: '69952afa000000001b01e949',
+            xsecToken: 'ABD5crNnmvUBtW_SH9ZlB2G3TWHxQqPEKH4irmuIN4ZZs=',
+            type: 'video'
+          },
+          index: 0,
+          exposed: false,
+          ssrRendered: true,
+          xsecToken: 'ABD5crNnmvUBtW_SH9ZlB2G3TWHxQqPEKH4irmuIN4ZZs='
+        },
+        {
+          id: '69971b1c000000001b01d76e',
+          noteCard: {
+            displayTitle: 'title',
+            noteId: '69971b1c000000001b01d76e',
+            xsecToken: 'ABbY2uTCgLbdfHqUw5lq-9g_N4jOS-9ZFuvTexDwEkBvI=',
+            type: 'video'
+          },
+          index: 1,
+          exposed: false,
+          ssrRendered: true,
+          xsecToken: 'ABbY2uTCgLbdfHqUw5lq-9g_N4jOS-9ZFuvTexDwEkBvI='
+        }
+      ]]
+    }
+  });
+  const map = api.extractTokensFromState(snippet);
+  assert.equal(map['69952afa000000001b01e949'], 'ABD5crNnmvUBtW_SH9ZlB2G3TWHxQqPEKH4irmuIN4ZZs=');
+  assert.equal(map['69971b1c000000001b01d76e'], 'ABbY2uTCgLbdfHqUw5lq-9g_N4jOS-9ZFuvTexDwEkBvI=');
+  assert.equal(Object.keys(api.extractTokensFromState('{"xsec_token":"snake"}')).length, 0);
+  assert.equal(
+    api.buildShareLink('69952afa000000001b01e949', map['69952afa000000001b01e949']),
+    'https://www.xiaohongshu.com/explore/69952afa000000001b01e949?xsec_token=ABD5crNnmvUBtW_SH9ZlB2G3TWHxQqPEKH4irmuIN4ZZs%3D&xsec_source=pc_feed'
+  );
+});
+
 test('next popular card selection skips viewport and chooses nearest without mutation', () => {
   const select = load().__XHS_ENHANCED_TEST_API__.selectNextPopularCard;
   function candidate(top, { connected = true, popular = true } = {}) {

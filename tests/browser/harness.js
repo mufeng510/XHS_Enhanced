@@ -92,13 +92,36 @@
     const originalWriteText = navigator.clipboard && navigator.clipboard.writeText;
     const copied = [];
     if (navigator.clipboard) navigator.clipboard.writeText = v => { copied.push(String(v)); return Promise.resolve(); };
+    // Real XHS profile pages expose camelCase xsecToken on window.__INITIAL_STATE__.user.notes.
+    globalThis.__INITIAL_STATE__ = {
+      user: {
+        notes: [[{
+          id: 'p1',
+          noteCard: { noteId: 'p1', xsecToken: 'stateTokenP1=', type: 'video' },
+          index: 0,
+          exposed: false,
+          ssrRendered: true,
+          xsecToken: 'stateTokenP1='
+        }, {
+          id: 'p3',
+          noteCard: { noteId: 'p3', xsecToken: 'stateTokenP3=', type: 'normal' },
+          index: 1,
+          exposed: false,
+          ssrRendered: true,
+          xsecToken: 'stateTokenP3='
+        }]]
+      }
+    };
     try {
       card('profile-101').querySelector('.xhs-enhanced-copy-link').click(); await checkpoint();
-      assert(copied[copied.length - 1] === 'https://www.xiaohongshu.com/explore/p2?xsec_token=hrefTokenP2&xsec_source=pc_feed', 'copy link builds explore format with xsec_token from href');
+      assert(copied[copied.length - 1] === 'https://www.xiaohongshu.com/explore/p2?xsec_token=hrefTokenP2&xsec_source=pc_feed', 'copy link prefers xsec_token from card href when present');
       card('profile-100').querySelector('.xhs-enhanced-copy-link').click(); await checkpoint();
-      assert(copied[copied.length - 1] === 'https://www.xiaohongshu.com/explore/p1', 'copy link falls back to bare explore link when token unavailable');
+      assert(copied[copied.length - 1] === 'https://www.xiaohongshu.com/explore/p1?xsec_token=stateTokenP1%3D&xsec_source=pc_feed', 'copy link uses per-note xsecToken from __INITIAL_STATE__ when href has no token');
+      card('profile-fallback').querySelector('.xhs-enhanced-copy-link').click(); await checkpoint();
+      assert(copied[copied.length - 1] === 'https://www.xiaohongshu.com/explore/p3?xsec_token=stateTokenP3%3D&xsec_source=pc_feed', 'copy link resolves distinct per-note tokens from state');
     } finally {
       if (navigator.clipboard) navigator.clipboard.writeText = originalWriteText;
+      try { delete globalThis.__INITIAL_STATE__; } catch (_) { globalThis.__INITIAL_STATE__ = undefined; }
     }
     api.setTestRoute('/search_result'); await checkpoint();
     assert(!searchCard.querySelector('.xhs-enhanced-card-actions'), 'leaving profile route removes copy actions from existing cards');
