@@ -12,11 +12,18 @@ execFileSync(process.execPath, ['--check', 'scripts/browser-test-server.cjs'], {
 for (const line of [
   '@match        https://www.xiaohongshu.com/search_result*',
   '@match        https://www.xiaohongshu.com/user/profile/*',
-  '@grant        none', '@run-at       document-idle'
+  '@grant        GM_xmlhttpRequest',
+  '@connect      *.xhscdn.com',
+  '@connect      ci.xiaohongshu.com',
+  '@run-at       document-idle'
 ]) assert(source.includes(line), `missing metadata: ${line}`);
-for (const forbidden of ['@connect', '@require', 'fetch(', 'XMLHttpRequest', 'WebSocket', 'sendBeacon', 'GM_xmlhttpRequest', 'preventDefault(', 'stopPropagation(', 'stopImmediatePropagation(', '.innerHTML =', 'alert(']) {
+for (const forbidden of ['@require', 'WebSocket', 'sendBeacon', 'preventDefault(', 'stopPropagation(', 'stopImmediatePropagation(', '.innerHTML =', 'alert(']) {
   assert(!source.includes(forbidden), `forbidden API/pattern: ${forbidden}`);
 }
+assert(!source.includes('@grant        none'), 'cover copy requires GM_xmlhttpRequest rather than grant none');
+assert(source.includes('toNoWatermarkCoverUrl'), 'no-watermark cover URL helper required');
+assert(source.includes('loadCoverPngBlob'), 'cover blob loader required');
+assert(source.includes('new ROOT.Uint8Array'), 'binary-safe dataUrlToBlob encoding required');
 const matchCount = (source.match(/^\/\/ @match/gm) || []).length;
 assert.strictEqual(matchCount, 2, 'exactly two @match entries required');
 assert(source.includes('attributeFilter: READ_ATTRIBUTES.slice()'), 'filtered attribute observer required');

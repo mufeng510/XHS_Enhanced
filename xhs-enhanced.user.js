@@ -1,11 +1,19 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.3.2
-// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；用户主页每个笔记卡片支持复制链接（explore 格式含 xsec_token）与封面
+// @version      1.3.3
+// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；用户主页每个笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      xhscdn.com
+// @connect      *.xhscdn.com
+// @connect      sns-webpic-qc.xhscdn.com
+// @connect      sns-img-qc.xhscdn.com
+// @connect      sns-avatar-qc.xhscdn.com
+// @connect      xiaohongshu.com
+// @connect      *.xiaohongshu.com
+// @connect      ci.xiaohongshu.com
 // @run-at       document-idle
 // @homepageURL  https://github.com/mufeng510/XHS_Enhanced
 // @supportURL   https://github.com/mufeng510/XHS_Enhanced/issues
@@ -19,7 +27,12 @@
   'use strict';
 
   const ROOT = globalThis;
-  const TEST_MODE = ROOT.__XHS_ENHANCED_TEST_MODE__ === true;
+  // Tampermonkey sandboxes scripts that use @grant; page globals like __INITIAL_STATE__ live on unsafeWindow.
+  const PAGE = (function resolvePageWindow() {
+    try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow && unsafeWindow.document) return unsafeWindow; } catch (_) {}
+    return ROOT;
+  }());
+  const TEST_MODE = ROOT.__XHS_ENHANCED_TEST_MODE__ === true || PAGE.__XHS_ENHANCED_TEST_MODE__ === true;
   const DEFAULT_THRESHOLD = 100;
   const THRESHOLD_STORAGE_KEY = 'xhs-enhanced:popular-threshold';
   const STYLE_ID = 'xhs-enhanced-style';
@@ -221,7 +234,8 @@
   function buildFallbackTokenMap() {
     const map = Object.create(null);
     try {
-      if (ROOT.__INITIAL_STATE__) collectTokensFromStateObject(ROOT.__INITIAL_STATE__, map, 0);
+      const initialState = (PAGE && PAGE.__INITIAL_STATE__) || ROOT.__INITIAL_STATE__;
+      if (initialState) collectTokensFromStateObject(initialState, map, 0);
     } catch (_) {
       // fall through to script text
     }
@@ -274,12 +288,112 @@
     return buildShareLink(id, token);
   }
 
+  function toNoWatermarkCoverUrl(input) {
+    const raw = normalizeSpace(input);
+    if (!raw) return '';
+    if (/^(?:data:|blob:)/i.test(raw)) return raw;
+    try {
+      const base = (PAGE.location && PAGE.location.href) || (ROOT.location && ROOT.location.href) || 'https://www.xiaohongshu.com/';
+      const url = new URL(raw, base);
+      // XHS processed variants put watermark/size transforms after '!' in the path.
+      url.pathname = url.pathname.replace(/!.*$/, '');
+      // imageView2-style process queries are often key-only path fragments; clear them aggressively.
+      if (/imageview2|x-oss-process|watermark/i.test(url.search)) {
+        url.search = '';
+      } else {
+        const dropKeys = [];
+        url.searchParams.forEach((value, key) => {
+          const k = String(key).toLowerCase();
+          const v = String(value).toLowerCase();
+          if (k.indexOf('imageview') >= 0 || v.indexOf('imageview') >= 0) dropKeys.push(key);
+          if (k === 'x-oss-process' || k.indexOf('watermark') >= 0) dropKeys.push(key);
+        });
+        for (const key of dropKeys) url.searchParams.delete(key);
+      }
+      return url.toString();
+    } catch (_) {
+      return raw.replace(/![^/?#]*/g, '').replace(/[?&](?:imageView2|x-oss-process|watermark)[^#]*/ig, '');
+    }
+  }
+
+  function pickLargestFromSrcset(srcset) {
+    const text = normalizeSpace(srcset);
+    if (!text) return '';
+    let bestUrl = '';
+    let bestScore = -1;
+    for (const part of text.split(',')) {
+      const bits = normalizeSpace(part).split(/\s+/);
+      if (!bits.length || !bits[0]) continue;
+      const url = bits[0];
+      let score = 0;
+      const desc = bits[1] || '';
+      const w = desc.match(/(\d+)w/i);
+      const x = desc.match(/([\d.]+)x/i);
+      if (w) score = Number(w[1]) || 0;
+      else if (x) score = Math.round((Number(x[1]) || 0) * 1000);
+      else score = 1;
+      if (score >= bestScore) {
+        bestScore = score;
+        bestUrl = url;
+      }
+    }
+    return bestUrl;
+  }
+
+  function readBackgroundImageUrl(node) {
+    if (!node) return '';
+    try {
+      const inline = node.style && node.style.backgroundImage ? node.style.backgroundImage : '';
+      const computed = (!inline && ROOT.getComputedStyle) ? ROOT.getComputedStyle(node).backgroundImage : inline;
+      const text = inline || computed || '';
+      const match = String(text).match(/url\((["']?)([^"')]+)\1\)/i);
+      return match ? normalizeSpace(match[2]) : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function pickCoverUrlFromImage(img) {
+    if (!img) return '';
+    const candidates = [
+      img.currentSrc,
+      img.getAttribute('src'),
+      img.getAttribute('data-src'),
+      img.getAttribute('data-original'),
+      pickLargestFromSrcset(img.getAttribute('srcset') || img.getAttribute('data-srcset') || '')
+    ];
+    for (const candidate of candidates) {
+      const value = normalizeSpace(candidate);
+      if (value) return value;
+    }
+    return '';
+  }
+
   function extractCoverUrl(card) {
     if (!card || !card.querySelector) return '';
-    const img = card.querySelector(COVER_IMAGE_SELECTORS);
-    if (!img) return '';
-    const src = img.getAttribute('src') || img.currentSrc || '';
-    return normalizeSpace(src);
+    const images = card.querySelectorAll(COVER_IMAGE_SELECTORS);
+    for (const img of images) {
+      const raw = pickCoverUrlFromImage(img);
+      if (!raw) continue;
+      if (/avatar|icon|emoji|logo/i.test(raw) && images.length > 1) continue;
+      return raw;
+    }
+    const mediaNodes = card.querySelectorAll('[style*="background"],.cover,.cover-container,.photo,.img,a');
+    for (const node of mediaNodes) {
+      const bg = readBackgroundImageUrl(node);
+      if (bg && !/avatar|icon|emoji|logo/i.test(bg)) return bg;
+    }
+    return '';
+  }
+
+  function coverUrlCandidates(raw) {
+    const original = normalizeSpace(raw);
+    if (!original) return [];
+    const normalized = toNoWatermarkCoverUrl(original);
+    const out = [];
+    if (normalized) out.push(normalized);
+    if (original && original !== normalized) out.push(original);
+    return out;
   }
 
   function clearCopyStatus() {
@@ -313,38 +427,209 @@
     return ROOT.navigator.clipboard.writeText(text).then(() => true, () => false);
   }
 
-  function copyImage(dataUrl, mimeType) {
-    if (!ROOT.navigator || !ROOT.navigator.clipboard || typeof ROOT.navigator.ClipboardItem !== 'function') {
+  function dataUrlToBlob(dataUrl, mimeType) {
+    if (!dataUrl) return null;
+    if (!/^data:/i.test(dataUrl)) return null;
+    const comma = dataUrl.indexOf(',');
+    if (comma < 0) return null;
+    const header = dataUrl.slice(0, comma);
+    const body = dataUrl.slice(comma + 1);
+    const typeMatch = header.match(/^data:([^;,]*)/i);
+    const type = (typeMatch && typeMatch[1]) || mimeType || 'application/octet-stream';
+    const isBase64 = /;base64/i.test(header);
+    try {
+      if (!isBase64) {
+        const text = decodeURIComponent(body);
+        const bytes = new ROOT.Uint8Array(text.length);
+        for (let i = 0; i < text.length; i += 1) bytes[i] = text.charCodeAt(i) & 0xff;
+        return new ROOT.Blob([bytes], { type: type || 'text/plain' });
+      }
+      if (!ROOT.atob) return null;
+      const binary = ROOT.atob(body);
+      const bytes = new ROOT.Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i) & 0xff;
+      return new ROOT.Blob([bytes], { type: type || 'application/octet-stream' });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function copyImageBlob(blob) {
+    if (!blob || !ROOT.navigator || !ROOT.navigator.clipboard || typeof ROOT.navigator.ClipboardItem !== 'function') {
       return Promise.resolve(false);
     }
     try {
-      const blob = dataUrlToBlob(dataUrl, mimeType);
-      if (!blob) return Promise.resolve(false);
-      const item = new ROOT.navigator.ClipboardItem({ [blob.type]: blob });
+      const type = blob.type && /^image\//i.test(blob.type) ? blob.type : 'image/png';
+      const payload = type === 'image/png' ? blob : blob.slice(0, blob.size, 'image/png');
+      const item = new ROOT.navigator.ClipboardItem({ 'image/png': Promise.resolve(type === 'image/png' ? blob : payload) });
       return ROOT.navigator.clipboard.write([item]).then(() => true, () => false);
     } catch (_) {
       return Promise.resolve(false);
     }
   }
 
-  function dataUrlToBlob(dataUrl, mimeType) {
-    if (!dataUrl) return null;
-    if (!/^data:/.test(dataUrl)) return null;
-    const comma = dataUrl.indexOf(',');
-    if (comma < 0) return null;
-    const header = dataUrl.slice(0, comma);
-    const body = dataUrl.slice(comma + 1);
-    const typeMatch = header.match(/^data:([^;,]*)/);
-    const type = (typeMatch && typeMatch[1]) || mimeType || 'application/octet-stream';
+  function copyImage(dataUrl, mimeType) {
+    const blob = dataUrlToBlob(dataUrl, mimeType || 'image/png');
+    if (!blob) return Promise.resolve(false);
+    return copyImageBlob(blob);
+  }
+
+  function canvasToPngBlob(img) {
     try {
-      const text = ROOT.atob ? ROOT.atob(body) : body;
-      const length = text.length;
-      const bytes = new Array(length);
-      for (let i = 0; i < length; i += 1) bytes[i] = text.charCodeAt(i) & 0xff;
-      return new ROOT.Blob(bytes, { type });
+      const canvas = ROOT.document.createElement('canvas');
+      if (!canvas || typeof canvas.getContext !== 'function') return Promise.resolve(null);
+      canvas.width = img.naturalWidth || img.width || 0;
+      canvas.height = img.naturalHeight || img.height || 0;
+      if (!canvas.width || !canvas.height) return Promise.resolve(null);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      if (typeof canvas.toBlob === 'function') {
+        return new Promise(resolve => {
+          try {
+            canvas.toBlob(blob => {
+              if (blob) { resolve(blob); return; }
+              try { resolve(dataUrlToBlob(canvas.toDataURL('image/png'), 'image/png')); }
+              catch (_) { resolve(null); }
+            }, 'image/png');
+          } catch (_) {
+            try { resolve(dataUrlToBlob(canvas.toDataURL('image/png'), 'image/png')); }
+            catch (e2) { resolve(null); }
+          }
+        });
+      }
+      return Promise.resolve(dataUrlToBlob(canvas.toDataURL('image/png'), 'image/png'));
     } catch (_) {
-      return null;
+      return Promise.resolve(null);
     }
+  }
+
+  function blobToPngBlob(blob) {
+    if (!blob) return Promise.resolve(null);
+    if (blob.type === 'image/png') return Promise.resolve(blob);
+    return new Promise(resolve => {
+      try {
+        if (!ROOT.URL || typeof ROOT.URL.createObjectURL !== 'function' || typeof ROOT.Image !== 'function') {
+          resolve(blob.type && /^image\//i.test(blob.type) ? blob : null);
+          return;
+        }
+        const objectUrl = ROOT.URL.createObjectURL(blob);
+        const img = new ROOT.Image();
+        img.onload = () => {
+          canvasToPngBlob(img).then(png => {
+            try { ROOT.URL.revokeObjectURL(objectUrl); } catch (_) {}
+            resolve(png || (blob.type && /^image\//i.test(blob.type) ? blob : null));
+          });
+        };
+        img.onerror = () => {
+          try { ROOT.URL.revokeObjectURL(objectUrl); } catch (_) {}
+          resolve(blob.type && /^image\//i.test(blob.type) ? blob : null);
+        };
+        img.src = objectUrl;
+      } catch (_) {
+        resolve(blob.type && /^image\//i.test(blob.type) ? blob : null);
+      }
+    });
+  }
+
+  function fetchCoverBlob(url) {
+    if (!url || typeof ROOT.fetch !== 'function') return Promise.resolve(null);
+    if (/^data:/i.test(url)) return Promise.resolve(dataUrlToBlob(url, 'image/png'));
+    if (/^blob:/i.test(url)) {
+      return ROOT.fetch(url).then(res => (res && res.ok ? res.blob() : null), () => null);
+    }
+    return ROOT.fetch(url, { mode: 'cors', credentials: 'omit', cache: 'force-cache' })
+      .then(res => (res && res.ok ? res.blob() : null), () => null)
+      .then(blob => {
+        if (!blob) return null;
+        if (blob.type && /^image\//i.test(blob.type)) return blob;
+        return blob.size > 32 ? blob.slice(0, blob.size, 'image/jpeg') : null;
+      });
+  }
+
+  function gmFetchCoverBlob(url) {
+    return new Promise(resolve => {
+      if (!url || /^(?:data:|blob:)/i.test(url)) { resolve(null); return; }
+      const req = (typeof GM_xmlhttpRequest === 'function' && GM_xmlhttpRequest)
+        || ROOT.GM_xmlhttpRequest
+        || (ROOT.GM && typeof ROOT.GM.xmlHttpRequest === 'function' && ROOT.GM.xmlHttpRequest)
+        || null;
+      if (typeof req !== 'function') { resolve(null); return; }
+      try {
+        req({
+          method: 'GET',
+          url,
+          responseType: 'blob',
+          anonymous: true,
+          timeout: 20000,
+          onload(res) {
+            try {
+              if (!res || res.status < 200 || res.status >= 300 || !res.response) { resolve(null); return; }
+              const blob = res.response;
+              if (!blob || typeof blob.size !== 'number') { resolve(null); return; }
+              if (blob.type && /^image\//i.test(blob.type)) { resolve(blob); return; }
+              resolve(blob.size > 32 ? new ROOT.Blob([blob], { type: 'image/jpeg' }) : null);
+            } catch (_) { resolve(null); }
+          },
+          onerror() { resolve(null); },
+          ontimeout() { resolve(null); }
+        });
+      } catch (_) { resolve(null); }
+    });
+  }
+
+  function loadCoverViaImage(url) {
+    return new Promise(resolve => {
+      try {
+        if (typeof ROOT.Image !== 'function') { resolve(null); return; }
+        if (/^data:/i.test(url)) { resolve(dataUrlToBlob(url, 'image/png')); return; }
+        const img = new ROOT.Image();
+        let settled = false;
+        const finish = value => { if (!settled) { settled = true; resolve(value); } };
+        img.onload = () => { canvasToPngBlob(img).then(finish); };
+        img.onerror = () => finish(null);
+        try { img.crossOrigin = 'anonymous'; } catch (_) {}
+        img.src = url;
+      } catch (_) { resolve(null); }
+    });
+  }
+
+  function loadCoverPngBlob(src) {
+    const candidates = coverUrlCandidates(src);
+    let chain = Promise.resolve(null);
+    for (const url of candidates) {
+      chain = chain.then(prev => {
+        if (prev) return prev;
+        return fetchCoverBlob(url).then(viaFetch => {
+          if (viaFetch) return blobToPngBlob(viaFetch).then(png => png || null);
+          return null;
+        }).then(png => {
+          if (png) return png;
+          return loadCoverViaImage(url);
+        }).then(viaImage => {
+          if (viaImage) return viaImage;
+          return gmFetchCoverBlob(url).then(viaGm => {
+            if (!viaGm) return null;
+            return blobToPngBlob(viaGm);
+          });
+        });
+      });
+    }
+    return chain.then(blob => (blob ? { ok: true, blob, mimeType: blob.type || 'image/png' } : { ok: false }));
+  }
+
+  function loadCoverDataUrl(src) {
+    return loadCoverPngBlob(src).then(result => {
+      if (!result.ok || !result.blob) return { ok: false };
+      return new Promise(resolve => {
+        try {
+          if (typeof ROOT.FileReader !== 'function') { resolve({ ok: false }); return; }
+          const reader = new ROOT.FileReader();
+          reader.onload = () => resolve({ ok: true, dataUrl: String(reader.result || ''), mimeType: 'image/png' });
+          reader.onerror = () => resolve({ ok: false });
+          reader.readAsDataURL(result.blob);
+        } catch (_) { resolve({ ok: false }); }
+      });
+    });
   }
 
   function onCopyLink(card) {
@@ -356,36 +641,10 @@
   function onCopyCover(card) {
     const src = extractCoverUrl(card);
     if (!src) { showCopyStatus(COPY_COVER_FAIL); return; }
-    loadCoverDataUrl(src).then(({ ok, dataUrl, mimeType }) => {
-      if (!ok || !dataUrl) { showCopyStatus(COPY_COVER_FAIL); return; }
-      copyImage(dataUrl, mimeType).then(copied => showCopyStatus(copied ? COPY_COVER_OK : COPY_COVER_FAIL));
-    });
-  }
-
-  function loadCoverDataUrl(src) {
-    return new Promise(resolve => {
-      try {
-        if (typeof ROOT.Image !== 'function') { resolve({ ok: false }); return; }
-        const img = new ROOT.Image();
-        const mimeType = /^data:/.test(src) ? (src.match(/^data:([^;,]*)/) || [])[1] || 'image/png' : 'image/png';
-        img.onload = () => {
-          try {
-            const canvas = ROOT.document.createElement('canvas');
-            if (!canvas || typeof canvas.getContext !== 'function') { resolve({ ok: false }); return; }
-            canvas.width = img.naturalWidth || img.width || 0;
-            canvas.height = img.naturalHeight || img.height || 0;
-            if (!canvas.width || !canvas.height) { resolve({ ok: false }); return; }
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0);
-            const dataUrl = canvas.toDataURL(mimeType);
-            resolve({ ok: true, dataUrl, mimeType });
-          } catch (_) { resolve({ ok: false }); }
-        };
-        img.onerror = () => resolve({ ok: false });
-        img.crossOrigin = 'anonymous';
-        img.src = src;
-      } catch (_) { resolve({ ok: false }); }
-    });
+    loadCoverPngBlob(src).then(result => {
+      if (!result.ok || !result.blob) { showCopyStatus(COPY_COVER_FAIL); return; }
+      copyImageBlob(result.blob).then(copied => showCopyStatus(copied ? COPY_COVER_OK : COPY_COVER_FAIL));
+    }, () => showCopyStatus(COPY_COVER_FAIL));
   }
 
   function ensureCardActions(card) {
@@ -894,16 +1153,19 @@
   const pureApi = Object.freeze({
     parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, isProfileRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
     getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue, extractTokensFromState,
+    toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, pickLargestFromSrcset,
     READ_ATTRIBUTES, SELECTORS
   });
 
   if (TEST_MODE) {
-    ROOT.__XHS_ENHANCED_TEST_API__ = Object.assign({}, pureApi, {
+    const testApi = Object.assign({}, pureApi, {
       setTestRoute(pathname, scheduleChange = true) { routeProvider = () => String(pathname || ''); lastUrl = ''; if (scheduleChange) schedule(ROOT.document); },
       clearTestRoute() { routeProvider = null; lastUrl = ''; schedule(ROOT.document); },
       scan: () => scan(ROOT.document), flush, init, destroy, setThreshold: value => setThreshold(value), getThreshold: () => threshold,
       getCounters: () => Object.assign({}, counters, { bindings: eventBindings.length, ownedHistoryWrappers: Number(Boolean(ownedPushState)) + Number(Boolean(ownedReplaceState)), observerRootIsBody: observerRoot === ROOT.document.body })
     });
+    ROOT.__XHS_ENHANCED_TEST_API__ = testApi;
+    try { if (PAGE && PAGE !== ROOT) PAGE.__XHS_ENHANCED_TEST_API__ = testApi; } catch (_) {}
   }
 
   if (ROOT.document) init();

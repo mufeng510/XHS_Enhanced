@@ -9,7 +9,7 @@
 - 同时高亮卡片内的点赞数；
 - 页面右上角提供“下一条热门笔记”悬浮按钮，跳过当前可见内容并平滑滚动到下方最近的热门笔记；
 - 没有下一条热门笔记时滚动到页面底部并提示，后续动态加载热门笔记后仍可继续跳转；
-- **用户主页每个笔记卡片悬浮显示“复制链接”“复制封面”按钮**：复制链接写入 `https://www.xiaohongshu.com/explore/<id>?xsec_token=<token>&xsec_source=pc_feed` 格式的分享链接（`xsec_token` 优先取自笔记卡片自身的 `href`，缺失时回退到页面 `window.__INITIAL_STATE__`，均无则使用裸链接）；复制封面将笔记封面图片写入剪贴板（受跨域与剪贴板权限限制时给出失败提示，不阻断页面）；
+- **用户主页每个笔记卡片悬浮显示“复制链接”“复制封面”按钮**：复制链接写入 `https://www.xiaohongshu.com/explore/<id>?xsec_token=<token>&xsec_source=pc_feed` 格式的分享链接（`xsec_token` 优先取自笔记卡片自身的 `href`，缺失时回退到页面 `window.__INITIAL_STATE__`，均无则使用裸链接）；复制封面将**无水印**笔记封面图片写入剪贴板（自动去掉 CDN `!nd_*` 等处理后缀；通过页面 CORS 或 `GM_xmlhttpRequest` 拉取图片字节；受剪贴板权限限制时给出失败提示，不阻断页面）；
 - 自动处理首屏内容、无限滚动新增内容、属性更新和站内 SPA 导航；
 - 不展示或推断笔记发布时间。
 
@@ -30,7 +30,7 @@
 - `https://www.xiaohongshu.com/search_result*`
 - `https://www.xiaohongshu.com/user/profile/*`
 
-脚本使用 `@grant none`，不声明网络、存储、剪贴板或菜单权限，不收集或上传页面数据。
+脚本声明 `@grant GM_xmlhttpRequest`，并 `@connect` 小红书图片 CDN 域名，仅用于在跨域限制下读取封面图字节以写入剪贴板；不收集或上传页面数据，不访问无关接口。
 
 ## 点赞数规则
 
@@ -54,3 +54,4 @@ npm test
 ## 许可证
 
 MIT License
+

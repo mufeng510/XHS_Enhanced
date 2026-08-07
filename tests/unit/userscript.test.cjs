@@ -11,7 +11,37 @@ function characterCount(content) {
 }
 
 function load(pathname = '/real/path', testMode = true, localStorage) {
-  const context = { console, location: { pathname }, __XHS_ENHANCED_TEST_MODE__: testMode };
+  class TestBlob {
+    constructor(parts = [], opts = {}) {
+      const chunks = [];
+      for (const part of parts) {
+        if (part == null) continue;
+        if (part instanceof Uint8Array) chunks.push(Buffer.from(part));
+        else if (Buffer.isBuffer(part)) chunks.push(part);
+        else if (ArrayBuffer.isView(part)) chunks.push(Buffer.from(part.buffer, part.byteOffset, part.byteLength));
+        else if (part instanceof ArrayBuffer) chunks.push(Buffer.from(part));
+        else chunks.push(Buffer.from(String(part)));
+      }
+      this._buf = Buffer.concat(chunks);
+      this.size = this._buf.length;
+      this.type = (opts && opts.type) || '';
+    }
+    slice(start = 0, end = this.size, type = this.type) {
+      return new TestBlob([this._buf.subarray(start, end)], { type });
+    }
+  }
+  const context = {
+    console,
+    location: { pathname, href: 'https://www.xiaohongshu.com' + pathname },
+    __XHS_ENHANCED_TEST_MODE__: testMode,
+    atob: value => Buffer.from(String(value), 'base64').toString('binary'),
+    btoa: value => Buffer.from(String(value), 'binary').toString('base64'),
+    Uint8Array,
+    ArrayBuffer,
+    Blob: TestBlob,
+    URL,
+    URLSearchParams
+  };
   if (localStorage !== undefined) context.localStorage = localStorage;
   context.globalThis = context;
   vm.runInNewContext(fs.readFileSync('xhs-enhanced.user.js', 'utf8'), context);
@@ -179,4 +209,56 @@ test('next popular card selection skips viewport and chooses nearest without mut
   assert.equal(select([tiedFirst, tiedSecond], 800), tiedFirst);
   assert.equal(select([candidate(-10), candidate(900, { connected: false }), candidate(900, { popular: false })], 800), null);
   assert.equal(select([], 800), null);
+});
+
+test('no-watermark cover URL strips XHS processing suffixes and process queries', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const raw = 'https://sns-webpic-qc.xhscdn.com/20240101/demo/foo.webp!nd_dft_wlteh_webp_3';
+  assert.equal(api.toNoWatermarkCoverUrl(raw), 'https://sns-webpic-qc.xhscdn.com/20240101/demo/foo.webp');
+  assert.equal(
+    api.toNoWatermarkCoverUrl('https://sns-img-qc.xhscdn.com/a.jpg!nd_prv_wlteh_webp_3?imageView2/2/w/1080/format/jpg'),
+    'https://sns-img-qc.xhscdn.com/a.jpg'
+  );
+  assert.equal(api.toNoWatermarkCoverUrl('data:image/png;base64,abc'), 'data:image/png;base64,abc');
+  const candidates = api.coverUrlCandidates(raw);
+  assert.equal(candidates[0], 'https://sns-webpic-qc.xhscdn.com/20240101/demo/foo.webp');
+  assert.equal(candidates[1], raw);
+  assert.equal(candidates.length, 2);
+  assert.equal(api.pickLargestFromSrcset('a.jpg 100w, b.jpg 800w, c.jpg 400w'), 'b.jpg');
+});
+
+test('dataUrlToBlob encodes binary PNG bytes instead of digit text', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const dataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const blob = api.dataUrlToBlob(dataUrl, 'image/png');
+  assert.ok(blob);
+  assert.equal(blob.type, 'image/png');
+  assert.ok(blob.size >= 68 && blob.size <= 72, 'png byte length should stay near decoded size, got ' + blob.size);
+});
+
+test('extractCoverUrl reads first real cover candidate from card images', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const cover = {
+    currentSrc: '',
+    getAttribute(name) {
+      if (name === 'src') return 'https://sns-webpic-qc.xhscdn.com/note/cover.webp!nd_dft_wlteh_webp_3';
+      return null;
+    }
+  };
+  const icon = {
+    currentSrc: '',
+    getAttribute(name) {
+      if (name === 'src') return 'https://sns-avatar-qc.xhscdn.com/avatar/icon.png';
+      return null;
+    }
+  };
+  const card = {
+    querySelector() { return null; },
+    querySelectorAll(selector) {
+      if (String(selector).indexOf('img') >= 0) return [icon, cover];
+      return [];
+    }
+  };
+  assert.equal(api.extractCoverUrl(card), 'https://sns-webpic-qc.xhscdn.com/note/cover.webp!nd_dft_wlteh_webp_3');
+  assert.equal(api.extractCoverUrl({ querySelectorAll: () => [] }), '');
 });

@@ -90,8 +90,18 @@
     }
     const searchCard = card('profile-100');
     const originalWriteText = navigator.clipboard && navigator.clipboard.writeText;
+    const originalWrite = navigator.clipboard && navigator.clipboard.write;
+    const originalClipboardItem = navigator.ClipboardItem;
     const copied = [];
-    if (navigator.clipboard) navigator.clipboard.writeText = v => { copied.push(String(v)); return Promise.resolve(); };
+    const copiedImages = [];
+    class FakeClipboardItem {
+      constructor(items) { this.items = items; }
+    }
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText = v => { copied.push(String(v)); return Promise.resolve(); };
+      navigator.ClipboardItem = FakeClipboardItem;
+      navigator.clipboard.write = async items => { copiedImages.push(items); };
+    }
     // Real XHS profile pages expose camelCase xsecToken on window.__INITIAL_STATE__.user.notes.
     globalThis.__INITIAL_STATE__ = {
       user: {
@@ -119,8 +129,20 @@
       assert(copied[copied.length - 1] === 'https://www.xiaohongshu.com/explore/p1?xsec_token=stateTokenP1%3D&xsec_source=pc_feed', 'copy link uses per-note xsecToken from __INITIAL_STATE__ when href has no token');
       card('profile-fallback').querySelector('.xhs-enhanced-copy-link').click(); await checkpoint();
       assert(copied[copied.length - 1] === 'https://www.xiaohongshu.com/explore/p3?xsec_token=stateTokenP3%3D&xsec_source=pc_feed', 'copy link resolves distinct per-note tokens from state');
+      card('profile-100').querySelector('.xhs-enhanced-copy-cover').click();
+      await checkpoint();
+      await checkpoint();
+      assert(copiedImages.length >= 1, 'copy-cover writes image to clipboard');
+      const first = copiedImages[0][0];
+      assert(first && first.items && first.items['image/png'], 'copy-cover clipboard payload is image/png');
+      const status = document.getElementById('xhs-enhanced-copy-status');
+      assert(status && status.textContent === '已复制笔记封面', 'copy-cover success toast');
     } finally {
-      if (navigator.clipboard) navigator.clipboard.writeText = originalWriteText;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText = originalWriteText;
+        if (originalWrite) navigator.clipboard.write = originalWrite;
+      }
+      if (originalClipboardItem) navigator.ClipboardItem = originalClipboardItem;
       try { delete globalThis.__INITIAL_STATE__; } catch (_) { globalThis.__INITIAL_STATE__ = undefined; }
     }
     api.setTestRoute('/search_result'); await checkpoint();
