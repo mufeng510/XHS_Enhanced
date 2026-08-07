@@ -266,8 +266,7 @@ test('extractCoverUrl reads first real cover candidate from card images', () => 
 test('coverRequestHeaders returns xiaohongshu referer', () => {
   const api = load('/user/profile/abc').__XHS_ENHANCED_TEST_API__;
   const headers = api.coverRequestHeaders();
-  assert.equal(headers.Referer, 'https://www.xiaohongshu.com/');
-  assert.equal(headers.Origin, 'https://www.xiaohongshu.com');
+  assert.equal(headers.Referer, 'https://www.xiaohongshu.com/user/profile/abc');
   assert.ok(headers.Accept && headers.Accept.indexOf('image/') >= 0);
 });
 

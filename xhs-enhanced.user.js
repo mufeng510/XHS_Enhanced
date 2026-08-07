@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.3.4
+// @version      1.3.6
 // @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；用户主页每个笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
@@ -14,6 +14,7 @@
 // @connect      xiaohongshu.com
 // @connect      *.xiaohongshu.com
 // @connect      ci.xiaohongshu.com
+// @connect      *
 // @run-at       document-idle
 // @homepageURL  https://github.com/mufeng510/XHS_Enhanced
 // @supportURL   https://github.com/mufeng510/XHS_Enhanced/issues
@@ -96,6 +97,8 @@
   let jumpStatusTimer = null;
   let copyStatus = null;
   let copyStatusTimer = null;
+  const coverBlobCache = new Map();
+  const COVER_CACHE_LIMIT = 80;
   let fallbackTokenMap = null;
   let fallbackTokenChecked = false;
   let originalPushState = null;
@@ -410,14 +413,26 @@
   }
 
   function coverRequestHeaders() {
-    const referer = (PAGE.location && PAGE.location.origin)
-      ? (PAGE.location.origin + '/')
+    const referer = (PAGE.location && PAGE.location.href)
+      ? PAGE.location.href
       : 'https://www.xiaohongshu.com/';
-    return {
+    const headers = {
+      // Do not set Origin: CDN ACAO:* rejects credentialed/origin-styled requests and bare Origin can 403.
       Referer: referer,
-      Origin: referer.replace(/\/$/, ''),
-      Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
+      Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
     };
+    try {
+      if (ROOT.navigator && ROOT.navigator.userAgent) headers['User-Agent'] = ROOT.navigator.userAgent;
+    } catch (_) {}
+    return headers;
+  }
+
+  function getGmRequest() {
+    if (typeof GM_xmlhttpRequest === 'function') return GM_xmlhttpRequest;
+    if (typeof GM === 'object' && GM && typeof GM.xmlHttpRequest === 'function') return GM.xmlHttpRequest;
+    if (ROOT.GM_xmlhttpRequest && typeof ROOT.GM_xmlhttpRequest === 'function') return ROOT.GM_xmlhttpRequest;
+    if (ROOT.GM && typeof ROOT.GM.xmlHttpRequest === 'function') return ROOT.GM.xmlHttpRequest;
+    return null;
   }
 
   function clearCopyStatus() {
@@ -444,84 +459,121 @@
     copyStatusTimer = ROOT.setTimeout(() => { copyStatusTimer = null; clearCopyStatus(); }, 2200);
   }
 
-  function copyText(text) {
-    if (!ROOT.navigator || !ROOT.navigator.clipboard || typeof ROOT.navigator.clipboard.writeText !== 'function') {
-      return Promise.resolve(false);
+  function getClipboardApi() {
+    // With @grant, sandbox clipboard often cannot write images; prefer page realm.
+    try {
+      if (PAGE && PAGE.navigator && PAGE.navigator.clipboard) return PAGE.navigator.clipboard;
+    } catch (_) {}
+    try {
+      if (ROOT.navigator && ROOT.navigator.clipboard) return ROOT.navigator.clipboard;
+    } catch (_) {}
+    return null;
+  }
+
+  function getClipboardItemCtor() {
+    // Prefer navigator.ClipboardItem so tests/host pages can mock it; fall back to realm globals.
+    try {
+      if (PAGE && PAGE.navigator && typeof PAGE.navigator.ClipboardItem === "function") return PAGE.navigator.ClipboardItem;
+    } catch (_) {}
+    try {
+      if (ROOT.navigator && typeof ROOT.navigator.ClipboardItem === "function") return ROOT.navigator.ClipboardItem;
+    } catch (_) {}
+    try {
+      if (PAGE && typeof PAGE.ClipboardItem === "function") return PAGE.ClipboardItem;
+    } catch (_) {}
+    try {
+      if (typeof ROOT.ClipboardItem === "function") return ROOT.ClipboardItem;
+    } catch (_) {}
+    return null;
+  }
+
+  function getPageBlobCtor() {
+    try {
+      if (PAGE && typeof PAGE.Blob === "function") return PAGE.Blob;
+    } catch (_) {}
+    return ROOT.Blob;
+  }
+
+  function transferBlobToPage(blob) {
+    if (!blob) return Promise.resolve(null);
+    const PageBlob = getPageBlobCtor();
+    if (!PageBlob) return Promise.resolve(blob);
+    try {
+      // Same-realm fast path.
+      if (blob instanceof PageBlob) return Promise.resolve(blob);
+    } catch (_) {}
+    if (typeof blob.arrayBuffer !== "function") {
+      try { return Promise.resolve(new PageBlob([blob], { type: blob.type || "image/png" })); }
+      catch (_) { return Promise.resolve(blob); }
     }
-    return ROOT.navigator.clipboard.writeText(text).then(() => true, () => false);
+    return blob.arrayBuffer().then(buf => {
+      try { return new PageBlob([buf], { type: blob.type || "image/png" }); }
+      catch (_) { return blob; }
+    }, () => blob);
+  }
+
+  function copyText(text) {
+    const clipboard = getClipboardApi();
+    if (!clipboard || typeof clipboard.writeText !== "function") return Promise.resolve(false);
+    return clipboard.writeText(text).then(() => true, () => false);
   }
 
   function dataUrlToBlob(dataUrl, mimeType) {
     if (!dataUrl) return null;
     if (!/^data:/i.test(dataUrl)) return null;
-    const comma = dataUrl.indexOf(',');
+    const comma = dataUrl.indexOf(",");
     if (comma < 0) return null;
     const header = dataUrl.slice(0, comma);
     const body = dataUrl.slice(comma + 1);
     const typeMatch = header.match(/^data:([^;,]*)/i);
-    const type = (typeMatch && typeMatch[1]) || mimeType || 'application/octet-stream';
+    const type = (typeMatch && typeMatch[1]) || mimeType || "application/octet-stream";
     const isBase64 = /;base64/i.test(header);
+    const BlobCtor = getPageBlobCtor() || ROOT.Blob;
     try {
       if (!isBase64) {
         const text = decodeURIComponent(body);
         const bytes = new ROOT.Uint8Array(text.length);
         for (let i = 0; i < text.length; i += 1) bytes[i] = text.charCodeAt(i) & 0xff;
-        return new ROOT.Blob([bytes], { type: type || 'text/plain' });
+        return new BlobCtor([bytes], { type: type || "text/plain" });
       }
       if (!ROOT.atob) return null;
       const binary = ROOT.atob(body);
       const bytes = new ROOT.Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i) & 0xff;
-      return new ROOT.Blob([bytes], { type: type || 'application/octet-stream' });
+      return new BlobCtor([bytes], { type: type || "application/octet-stream" });
     } catch (_) {
       return null;
     }
   }
 
-  function copyImageBlob(blob) {
-    if (!blob || !ROOT.navigator || !ROOT.navigator.clipboard || typeof ROOT.navigator.ClipboardItem !== 'function') {
-      return Promise.resolve(false);
-    }
-    try {
-      const type = blob.type && /^image\//i.test(blob.type) ? blob.type : 'image/png';
-      const payload = type === 'image/png' ? blob : blob.slice(0, blob.size, 'image/png');
-      const item = new ROOT.navigator.ClipboardItem({ 'image/png': Promise.resolve(type === 'image/png' ? blob : payload) });
-      return ROOT.navigator.clipboard.write([item]).then(() => true, () => false);
-    } catch (_) {
-      return Promise.resolve(false);
-    }
-  }
-
-  function copyImage(dataUrl, mimeType) {
-    const blob = dataUrlToBlob(dataUrl, mimeType || 'image/png');
-    if (!blob) return Promise.resolve(false);
-    return copyImageBlob(blob);
-  }
-
   function canvasToPngBlob(img) {
     try {
-      const canvas = ROOT.document.createElement('canvas');
-      if (!canvas || typeof canvas.getContext !== 'function') return Promise.resolve(null);
+      const canvas = ROOT.document.createElement("canvas");
+      if (!canvas || typeof canvas.getContext !== "function") return Promise.resolve(null);
       canvas.width = img.naturalWidth || img.width || 0;
       canvas.height = img.naturalHeight || img.height || 0;
       if (!canvas.width || !canvas.height) return Promise.resolve(null);
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext("2d");
       ctx.drawImage(img, 0, 0);
-      if (typeof canvas.toBlob === 'function') {
+      const BlobCtor = getPageBlobCtor() || ROOT.Blob;
+      if (typeof canvas.toBlob === "function") {
         return new Promise(resolve => {
           try {
             canvas.toBlob(blob => {
-              if (blob) { resolve(blob); return; }
-              try { resolve(dataUrlToBlob(canvas.toDataURL('image/png'), 'image/png')); }
-              catch (_) { resolve(null); }
-            }, 'image/png');
+              if (!blob) {
+                try { resolve(dataUrlToBlob(canvas.toDataURL("image/png"), "image/png")); }
+                catch (_) { resolve(null); }
+                return;
+              }
+              transferBlobToPage(blob).then(resolve, () => resolve(blob));
+            }, "image/png");
           } catch (_) {
-            try { resolve(dataUrlToBlob(canvas.toDataURL('image/png'), 'image/png')); }
+            try { resolve(dataUrlToBlob(canvas.toDataURL("image/png"), "image/png")); }
             catch (e2) { resolve(null); }
           }
         });
       }
-      return Promise.resolve(dataUrlToBlob(canvas.toDataURL('image/png'), 'image/png'));
+      return Promise.resolve(dataUrlToBlob(canvas.toDataURL("image/png"), "image/png"));
     } catch (_) {
       return Promise.resolve(null);
     }
@@ -529,11 +581,40 @@
 
   function blobToPngBlob(blob) {
     if (!blob) return Promise.resolve(null);
-    if (blob.type === 'image/png') return Promise.resolve(blob);
+    if (blob.type === "image/png") return transferBlobToPage(blob);
+    // Prefer createImageBitmap to avoid extra blob: network noise from <img src=blob:>.
+    if (typeof ROOT.createImageBitmap === "function") {
+      return ROOT.createImageBitmap(blob).then(bitmap => {
+        try {
+          const canvas = ROOT.document.createElement("canvas");
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+          if (!canvas.width || !canvas.height) {
+            try { bitmap.close(); } catch (_) {}
+            return transferBlobToPage(blob);
+          }
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(bitmap, 0, 0);
+          try { bitmap.close(); } catch (_) {}
+          if (typeof canvas.toBlob === "function") {
+            return new Promise(resolve => {
+              canvas.toBlob(out => {
+                if (!out) { resolve(transferBlobToPage(blob)); return; }
+                transferBlobToPage(out).then(resolve, () => resolve(out));
+              }, "image/png");
+            });
+          }
+          return Promise.resolve(dataUrlToBlob(canvas.toDataURL("image/png"), "image/png"));
+        } catch (_) {
+          try { bitmap.close(); } catch (e2) {}
+          return transferBlobToPage(blob);
+        }
+      }, () => transferBlobToPage(blob));
+    }
     return new Promise(resolve => {
       try {
-        if (!ROOT.URL || typeof ROOT.URL.createObjectURL !== 'function' || typeof ROOT.Image !== 'function') {
-          resolve(blob.type && /^image\//i.test(blob.type) ? blob : null);
+        if (!ROOT.URL || typeof ROOT.URL.createObjectURL !== "function" || typeof ROOT.Image !== "function") {
+          resolve(transferBlobToPage(blob));
           return;
         }
         const objectUrl = ROOT.URL.createObjectURL(blob);
@@ -541,92 +622,141 @@
         img.onload = () => {
           canvasToPngBlob(img).then(png => {
             try { ROOT.URL.revokeObjectURL(objectUrl); } catch (_) {}
-            resolve(png || (blob.type && /^image\//i.test(blob.type) ? blob : null));
+            if (png) resolve(png);
+            else transferBlobToPage(blob).then(resolve, () => resolve(blob));
           });
         };
         img.onerror = () => {
           try { ROOT.URL.revokeObjectURL(objectUrl); } catch (_) {}
-          resolve(blob.type && /^image\//i.test(blob.type) ? blob : null);
+          transferBlobToPage(blob).then(resolve, () => resolve(blob));
         };
         img.src = objectUrl;
       } catch (_) {
-        resolve(blob.type && /^image\//i.test(blob.type) ? blob : null);
+        transferBlobToPage(blob).then(resolve, () => resolve(blob));
       }
     });
   }
 
+  // IMPORTANT: call clipboard.write during the click gesture, with Promise values inside
+  // ClipboardItem so Chromium keeps user-activation across the async GM image load.
+  function copyImageBlob(blob) {
+    return copyImageBlobPromise(Promise.resolve(blob));
+  }
+
+  function copyImageBlobPromise(blobPromise) {
+    const clipboard = getClipboardApi();
+    const ClipboardItemCtor = getClipboardItemCtor();
+    if (!clipboard || typeof clipboard.write !== "function" || typeof ClipboardItemCtor !== "function") {
+      return Promise.resolve(false);
+    }
+    const pngPromise = Promise.resolve(blobPromise).then(blob => {
+      if (!blob) throw new Error("empty-cover-blob");
+      return blobToPngBlob(blob).then(png => {
+        const out = png || blob;
+        if (!out) throw new Error("cover-transcode-failed");
+        return transferBlobToPage(out).then(pageBlob => pageBlob || out);
+      });
+    }).then(blob => {
+      if (!blob) throw new Error("empty-page-blob");
+      // Chromium image clipboard is most reliable with image/png.
+      if (blob.type === "image/png") return blob;
+      return blob.slice ? blob.slice(0, blob.size, "image/png") : blob;
+    });
+    try {
+      const item = new ClipboardItemCtor({ "image/png": pngPromise });
+      return clipboard.write([item]).then(() => true, () => false);
+    } catch (_) {
+      // Fallback for environments requiring resolved blobs only.
+      return pngPromise.then(blob => {
+        try {
+          const item = new ClipboardItemCtor({ "image/png": blob });
+          return clipboard.write([item]).then(() => true, () => false);
+        } catch (e2) {
+          return false;
+        }
+      }, () => false);
+    }
+  }
+
+  function copyImage(dataUrl, mimeType) {
+    const blob = dataUrlToBlob(dataUrl, mimeType || "image/png");
+    if (!blob) return Promise.resolve(false);
+    return copyImageBlob(blob);
+  }
+
   function guessImageMimeFromUrl(url) {
-    const text = String(url || '').toLowerCase();
-    if (text.indexOf('.png') >= 0) return 'image/png';
-    if (text.indexOf('.webp') >= 0 || text.indexOf('webp') >= 0) return 'image/webp';
-    if (text.indexOf('.gif') >= 0) return 'image/gif';
-    return 'image/jpeg';
+    const text = String(url || "").toLowerCase();
+    if (text.indexOf(".png") >= 0) return "image/png";
+    if (text.indexOf(".webp") >= 0 || text.indexOf("webp") >= 0) return "image/webp";
+    if (text.indexOf(".gif") >= 0) return "image/gif";
+    return "image/jpeg";
+  }
+
+  function looksLikeImageBytes(bytes) {
+    if (!bytes || bytes.length < 4) return false;
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true;
+    if (bytes[0] === 0xff && bytes[1] === 0xd8) return true;
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return true;
+    if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) return true;
+    return false;
   }
 
   function normalizeFetchedImageBlob(blob, url) {
-    if (!blob || typeof blob.size !== 'number' || blob.size < 32) return null;
-    if (blob.type && /^image\//i.test(blob.type)) return blob;
-    return blob.slice(0, blob.size, guessImageMimeFromUrl(url));
-  }
-
-  // Page fetch/cors often 403s on xhscdn anti-hotlink; keep as late fallback only.
-  function fetchCoverBlob(url) {
-    if (!url || typeof ROOT.fetch !== 'function') return Promise.resolve(null);
-    if (/^data:/i.test(url)) return Promise.resolve(dataUrlToBlob(url, 'image/png'));
-    if (/^blob:/i.test(url)) {
-      return ROOT.fetch(url).then(res => (res && res.ok ? res.blob() : null), () => null);
+    if (!blob || typeof blob.size !== "number" || blob.size < 32) return null;
+    if (blob.type && /^image\//i.test(blob.type) && blob.type.indexOf("svg") < 0) return blob;
+    const BlobCtor = getPageBlobCtor() || ROOT.Blob;
+    try {
+      return blob.slice ? blob.slice(0, blob.size, guessImageMimeFromUrl(url))
+        : new BlobCtor([blob], { type: guessImageMimeFromUrl(url) });
+    } catch (_) {
+      return null;
     }
-    return ROOT.fetch(url, {
-      mode: 'cors',
-      credentials: 'include',
-      cache: 'force-cache',
-      referrer: (PAGE.location && PAGE.location.href) || 'https://www.xiaohongshu.com/',
-      referrerPolicy: 'strict-origin-when-cross-origin'
-    })
-      .then(res => (res && res.ok ? res.blob() : null), () => null)
-      .then(blob => normalizeFetchedImageBlob(blob, url));
   }
 
-  function gmFetchCoverBlob(url) {
+  function cacheCoverBlob(url, blob) {
+    const key = normalizeSpace(url);
+    if (!key || !blob) return;
+    if (coverBlobCache.size >= COVER_CACHE_LIMIT) {
+      const first = coverBlobCache.keys().next().value;
+      if (first !== undefined) coverBlobCache.delete(first);
+    }
+    coverBlobCache.set(key, blob);
+  }
+
+  function getCachedCoverBlob(url) {
+    const key = normalizeSpace(url);
+    if (!key) return null;
+    const hit = coverBlobCache.get(key);
+    return hit && typeof hit.size === "number" ? hit : null;
+  }
+
+  // Never page-fetch remote CDN images.
+  function fetchCoverBlob(url) {
+    if (!url) return Promise.resolve(null);
+    if (/^data:/i.test(url)) return Promise.resolve(dataUrlToBlob(url, "image/png"));
+    if (/^blob:/i.test(url) && typeof ROOT.fetch === "function") {
+      return ROOT.fetch(url).then(res => (res && res.ok ? res.blob() : null), () => null)
+        .then(blob => normalizeFetchedImageBlob(blob, url));
+    }
+    return Promise.resolve(null);
+  }
+
+  function gmRequestOnce(url, responseType) {
     return new Promise(resolve => {
-      if (!url || /^(?:data:|blob:)/i.test(url)) { resolve(null); return; }
-      const req = (typeof GM_xmlhttpRequest === 'function' && GM_xmlhttpRequest)
-        || ROOT.GM_xmlhttpRequest
-        || (ROOT.GM && typeof ROOT.GM.xmlHttpRequest === 'function' && ROOT.GM.xmlHttpRequest)
-        || null;
-      if (typeof req !== 'function') { resolve(null); return; }
-      const headers = coverRequestHeaders();
-      const finishBlob = raw => {
-        if (!raw) { resolve(null); return; }
-        try {
-          if (raw instanceof ROOT.Blob || (raw && typeof raw.size === 'number' && typeof raw.type === 'string')) {
-            resolve(normalizeFetchedImageBlob(raw, url));
-            return;
-          }
-          // arraybuffer / typed array responses
-          if (raw && (raw.byteLength >= 0 || raw.buffer)) {
-            const view = raw instanceof ROOT.ArrayBuffer ? new ROOT.Uint8Array(raw) : new ROOT.Uint8Array(raw.buffer || raw);
-            if (view.byteLength < 32) { resolve(null); return; }
-            resolve(new ROOT.Blob([view], { type: guessImageMimeFromUrl(url) }));
-            return;
-          }
-          resolve(null);
-        } catch (_) { resolve(null); }
-      };
+      const req = getGmRequest();
+      if (!req) { resolve(null); return; }
       try {
         req({
-          method: 'GET',
+          method: "GET",
           url,
-          // Prefer arraybuffer for broad TM compatibility, then wrap as image blob.
-          responseType: 'arraybuffer',
-          // Keep cookies if the manager provides them; anti-hotlink often wants site context.
+          responseType,
           anonymous: false,
           timeout: 20000,
-          headers,
+          headers: coverRequestHeaders(),
           onload(res) {
             try {
-              if (!res || res.status < 200 || res.status >= 300) { resolve(null); return; }
-              finishBlob(res.response);
+              if (!res || res.status < 200 || res.status >= 300 || res.response == null) { resolve(null); return; }
+              resolve(res.response);
             } catch (_) { resolve(null); }
           },
           onerror() { resolve(null); },
@@ -636,15 +766,33 @@
     });
   }
 
-  // Avoid crossOrigin=anonymous on remote CDN: it switches the request into a CORS
-  // mode that xhscdn frequently answers with 403 even when normal <img> loads fine.
+  function gmFetchCoverBlob(url) {
+    if (!url || /^(?:data:|blob:)/i.test(url)) return Promise.resolve(null);
+    if (!getGmRequest()) return Promise.resolve(null);
+    return gmRequestOnce(url, "blob").then(raw => {
+      if (raw && (typeof raw.size === "number")) {
+        const blob = normalizeFetchedImageBlob(raw, url);
+        if (blob) return blob;
+      }
+      return gmRequestOnce(url, "arraybuffer").then(buf => {
+        if (!buf) return null;
+        try {
+          const view = buf instanceof ROOT.ArrayBuffer ? new ROOT.Uint8Array(buf) : new ROOT.Uint8Array(buf.buffer || buf);
+          if (view.byteLength < 32) return null;
+          if (!looksLikeImageBytes(view)) return null;
+          const BlobCtor = getPageBlobCtor() || ROOT.Blob;
+          return new BlobCtor([view], { type: guessImageMimeFromUrl(url) });
+        } catch (_) { return null; }
+      });
+    });
+  }
+
   function loadCoverViaImage(url) {
     return new Promise(resolve => {
       try {
-        if (typeof ROOT.Image !== 'function') { resolve(null); return; }
-        if (/^data:/i.test(url)) { resolve(dataUrlToBlob(url, 'image/png')); return; }
-        // Remote images without CORS cannot be exported from canvas; skip noisy attempts.
-        if (!/^(?:blob:)/i.test(url)) { resolve(null); return; }
+        if (typeof ROOT.Image !== "function") { resolve(null); return; }
+        if (/^data:/i.test(url)) { resolve(dataUrlToBlob(url, "image/png")); return; }
+        if (!/^blob:/i.test(url)) { resolve(null); return; }
         const img = new ROOT.Image();
         let settled = false;
         const finish = value => { if (!settled) { settled = true; resolve(value); } };
@@ -661,31 +809,29 @@
       const images = card.querySelectorAll(COVER_IMAGE_SELECTORS);
       for (const img of images) {
         if (!img || !(img.naturalWidth || img.width) || !(img.naturalHeight || img.height)) continue;
-        // Only works when the image is same-origin/data/blob or already CORS-clean.
         return canvasToPngBlob(img).then(blob => blob || null, () => null);
       }
     } catch (_) {}
     return Promise.resolve(null);
   }
 
-  function loadCoverPngBlob(src, card) {
-    const candidates = coverUrlCandidates(src);
-    // 1) DOM canvas (rarely works cross-origin, zero network)
-    // 2) GM + Referer (bypasses page CORS / anti-hotlink better than fetch)
-    // 3) fetch fallback
-    // 4) blob:/data: image path
-    let chain = loadCoverFromCardImage(card);
+  function resolveCoverBlobFromCandidates(candidates) {
+    let chain = Promise.resolve(null);
     for (const url of candidates) {
       chain = chain.then(prev => {
         if (prev) return prev;
+        const cached = getCachedCoverBlob(url);
+        if (cached) return cached;
         return gmFetchCoverBlob(url).then(viaGm => {
-          if (viaGm) return blobToPngBlob(viaGm).then(png => png || viaGm);
-          return null;
+          if (!viaGm) return null;
+          cacheCoverBlob(url, viaGm);
+          return viaGm;
         }).then(png => {
           if (png) return png;
           return fetchCoverBlob(url).then(viaFetch => {
-            if (viaFetch) return blobToPngBlob(viaFetch).then(p => p || viaFetch);
-            return null;
+            if (!viaFetch) return null;
+            cacheCoverBlob(url, viaFetch);
+            return viaFetch;
           });
         }).then(png => {
           if (png) return png;
@@ -693,7 +839,31 @@
         });
       });
     }
-    return chain.then(blob => (blob ? { ok: true, blob, mimeType: blob.type || 'image/png' } : { ok: false }));
+    return chain;
+  }
+
+  // Soft prefetch only the first visible candidate; no blob: transcode during prefetch.
+  function prefetchCardCover(card) {
+    try {
+      if (!getGmRequest()) return;
+      const src = extractCoverUrl(card);
+      if (!src || /^(?:data:|blob:)/i.test(src)) return;
+      const primary = coverUrlCandidates(src)[0];
+      if (!primary || getCachedCoverBlob(primary) || coverBlobCache.has(primary + "#pending")) return;
+      coverBlobCache.set(primary + "#pending", true);
+      gmFetchCoverBlob(primary).then(blob => {
+        coverBlobCache.delete(primary + "#pending");
+        if (blob) cacheCoverBlob(primary, blob);
+      }, () => { coverBlobCache.delete(primary + "#pending"); });
+    } catch (_) {}
+  }
+
+  function loadCoverPngBlob(src, card) {
+    const candidates = coverUrlCandidates(src);
+    return loadCoverFromCardImage(card).then(fromDom => {
+      if (fromDom) return fromDom;
+      return resolveCoverBlobFromCandidates(candidates);
+    }).then(blob => (blob ? { ok: true, blob, mimeType: blob.type || "image/png" } : { ok: false }));
   }
 
   function loadCoverDataUrl(src) {
@@ -701,9 +871,9 @@
       if (!result.ok || !result.blob) return { ok: false };
       return new Promise(resolve => {
         try {
-          if (typeof ROOT.FileReader !== 'function') { resolve({ ok: false }); return; }
+          if (typeof ROOT.FileReader !== "function") { resolve({ ok: false }); return; }
           const reader = new ROOT.FileReader();
-          reader.onload = () => resolve({ ok: true, dataUrl: String(reader.result || ''), mimeType: 'image/png' });
+          reader.onload = () => resolve({ ok: true, dataUrl: String(reader.result || ""), mimeType: "image/png" });
           reader.onerror = () => resolve({ ok: false });
           reader.readAsDataURL(result.blob);
         } catch (_) { resolve({ ok: false }); }
@@ -720,9 +890,15 @@
   function onCopyCover(card) {
     const src = extractCoverUrl(card);
     if (!src) { showCopyStatus(COPY_COVER_FAIL); return; }
-    loadCoverPngBlob(src, card).then(result => {
-      if (!result.ok || !result.blob) { showCopyStatus(COPY_COVER_FAIL); return; }
-      copyImageBlob(result.blob).then(copied => showCopyStatus(copied ? COPY_COVER_OK : COPY_COVER_FAIL));
+    // Start clipboard write in the same turn as the click (Promise ClipboardItem),
+    // so the async GM download still counts as user-activated.
+    const blobPromise = loadCoverPngBlob(src, card).then(result => {
+      if (!result.ok || !result.blob) throw new Error("cover-load-failed");
+      return result.blob;
+    });
+    copyImageBlobPromise(blobPromise).then(copied => {
+      if (copied) showCopyStatus(COPY_COVER_OK);
+      else showCopyStatus(getGmRequest() ? COPY_COVER_FAIL : (COPY_COVER_FAIL + "???????"));
     }, () => showCopyStatus(COPY_COVER_FAIL));
   }
 
@@ -752,6 +928,7 @@
       card.appendChild(container);
     }
     card.setAttribute(CARD_ACTIONS_ATTRIBUTE, getCurrentRoute());
+    prefetchCardCover(card);
   }
 
   function removeCardActions(card) {
@@ -1232,7 +1409,7 @@
   const pureApi = Object.freeze({
     parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, isProfileRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
     getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue, extractTokensFromState,
-    toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, coverRequestHeaders, pickLargestFromSrcset,
+    toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, coverRequestHeaders, getGmRequest, pickLargestFromSrcset,
     READ_ATTRIBUTES, SELECTORS
   });
 

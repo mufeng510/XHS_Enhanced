@@ -100,7 +100,8 @@
     if (navigator.clipboard) {
       navigator.clipboard.writeText = v => { copied.push(String(v)); return Promise.resolve(); };
       navigator.ClipboardItem = FakeClipboardItem;
-      navigator.clipboard.write = async items => { copiedImages.push(items); };
+      try { globalThis.ClipboardItem = FakeClipboardItem; } catch (_) {}
+      navigator.clipboard.write = async items => { copiedImages.push(items); return undefined; };
     }
     // Real XHS profile pages expose camelCase xsecToken on window.__INITIAL_STATE__.user.notes.
     globalThis.__INITIAL_STATE__ = {
@@ -132,9 +133,13 @@
       card('profile-100').querySelector('.xhs-enhanced-copy-cover').click();
       await checkpoint();
       await checkpoint();
+      await checkpoint();
       assert(copiedImages.length >= 1, 'copy-cover writes image to clipboard');
       const first = copiedImages[0][0];
       assert(first && first.items && first.items['image/png'], 'copy-cover clipboard payload is image/png');
+      const payload = first.items['image/png'];
+      const resolved = payload && typeof payload.then === 'function' ? await payload : payload;
+      assert(resolved && typeof resolved.size === 'number' && resolved.size > 0, 'copy-cover clipboard image blob resolved');
       const status = document.getElementById('xhs-enhanced-copy-status');
       assert(status && status.textContent === '已复制笔记封面', 'copy-cover success toast');
     } finally {
