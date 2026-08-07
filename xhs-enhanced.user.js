@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.3.6
+// @version      1.3.8
 // @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；用户主页每个笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
@@ -57,6 +57,7 @@
   const COPY_LINK_FAIL = '链接复制失败';
   const COPY_COVER_OK = '已复制笔记封面';
   const COPY_COVER_FAIL = '封面复制失败';
+  const COPY_COVER_AUTH_FAIL = '封面复制失败（需油猴授权）';
   const COVER_IMAGE_SELECTORS = 'img.cover,img[src*="sns-img"],img[src*="xhscdn"],picture img,article img,section.note-item img,.note-item img';
   const COPY_STATUS_ID = 'xhs-enhanced-copy-status';
   const SHARE_BASE = 'https://www.xiaohongshu.com/';
@@ -99,6 +100,7 @@
   let copyStatusTimer = null;
   const coverBlobCache = new Map();
   const COVER_CACHE_LIMIT = 80;
+  let copyCoverInFlight = false;
   let fallbackTokenMap = null;
   let fallbackTokenChecked = false;
   let originalPushState = null;
@@ -199,19 +201,68 @@
     return parseQueryValue(text, XSEC_TOKEN_QUERY);
   }
 
-  function collectTokensFromStateObject(value, map, depth) {
-    if (!value || depth > 14) return;
+
+  function collectTokensFromStateObject(value, map, depth, seen) {
+    if (!value || depth > 12) return;
+    if (typeof value !== 'object') return;
+    if (seen) {
+      if (seen.has(value)) return;
+      seen.add(value);
+    }
     if (Array.isArray(value)) {
-      for (const item of value) collectTokensFromStateObject(item, map, depth + 1);
+      for (let i = 0; i < value.length; i += 1) collectTokensFromStateObject(value[i], map, depth + 1, seen);
       return;
     }
-    if (typeof value !== 'object') return;
-    const id = typeof value.id === 'string' ? value.id
-      : typeof value.noteId === 'string' ? value.noteId
+    const id = typeof value.noteId === 'string' ? value.noteId
+      : typeof value.id === 'string' ? value.id
         : '';
     const token = typeof value.xsecToken === 'string' ? value.xsecToken : '';
     if (id && token && !map[id]) map[id] = token;
-    for (const key of Object.keys(value)) collectTokensFromStateObject(value[key], map, depth + 1);
+    const keys = Object.keys(value);
+    const preferred = [];
+    const rest = [];
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
+      if (key === 'notes' || key === 'note' || key === 'noteCard' || key === 'noteDetailMap' || key === 'user' || key === 'feed') preferred.push(key);
+      else rest.push(key);
+    }
+    const ordered = preferred.length ? preferred.concat(rest) : keys;
+    for (let i = 0; i < ordered.length; i += 1) collectTokensFromStateObject(value[ordered[i]], map, depth + 1, seen);
+  }
+
+  function findTokenForNoteIdInState(value, noteId, depth, seen) {
+    if (!value || !noteId || depth > 12) return '';
+    if (typeof value !== 'object') return '';
+    if (seen) {
+      if (seen.has(value)) return '';
+      seen.add(value);
+    }
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i += 1) {
+        const found = findTokenForNoteIdInState(value[i], noteId, depth + 1, seen);
+        if (found) return found;
+      }
+      return '';
+    }
+    const id = typeof value.noteId === 'string' ? value.noteId
+      : typeof value.id === 'string' ? value.id
+        : '';
+    const token = typeof value.xsecToken === 'string' ? value.xsecToken : '';
+    if (id === noteId && token) return token;
+    const keys = Object.keys(value);
+    const preferred = [];
+    const rest = [];
+    for (let i = 0; i < keys.length; i += 1) {
+      const key = keys[i];
+      if (key === 'notes' || key === 'note' || key === 'noteCard' || key === 'noteDetailMap' || key === 'user' || key === 'feed' || key === noteId) preferred.push(key);
+      else rest.push(key);
+    }
+    const ordered = preferred.length ? preferred.concat(rest) : keys;
+    for (let i = 0; i < ordered.length; i += 1) {
+      const found = findTokenForNoteIdInState(value[ordered[i]], noteId, depth + 1, seen);
+      if (found) return found;
+    }
+    return '';
   }
 
   function extractTokensFromState(content) {
@@ -234,42 +285,78 @@
     return map;
   }
 
+  function extractTokenForNoteIdFromScriptText(noteId) {
+    if (!noteId) return '';
+    const doc = ROOT.document;
+    if (!doc || !doc.querySelectorAll) return '';
+    try {
+      const scripts = doc.querySelectorAll('script:not([src])');
+      const safeId = String(noteId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const near = new RegExp(
+        '"noteId"\\s*:\\s*"' + safeId + '"[\\s\\S]{0,240}?"xsecToken"\\s*:\\s*"([^"]+)"|' +
+        '"xsecToken"\\s*:\\s*"([^"]+)"[\\s\\S]{0,240}?"noteId"\\s*:\\s*"' + safeId + '"|' +
+        '"id"\\s*:\\s*"' + safeId + '"[\\s\\S]{0,400}?"xsecToken"\\s*:\\s*"([^"]+)"'
+      );
+      for (let i = 0; i < scripts.length; i += 1) {
+        const content = scripts[i].textContent || '';
+        if (content.indexOf(noteId) < 0) continue;
+        if (content.indexOf('xsecToken') < 0 && content.indexOf('__INITIAL_STATE__') < 0) continue;
+        const match = near.exec(content);
+        if (match) return match[1] || match[2] || match[3] || '';
+      }
+    } catch (_) {}
+    return '';
+  }
+
   function buildFallbackTokenMap() {
     const map = Object.create(null);
     try {
       const initialState = (PAGE && PAGE.__INITIAL_STATE__) || ROOT.__INITIAL_STATE__;
-      if (initialState) collectTokensFromStateObject(initialState, map, 0);
-    } catch (_) {
-      // fall through to script text
-    }
-    if (Object.keys(map).length) return map;
-    const doc = ROOT.document;
-    if (!doc || !doc.querySelectorAll) return map;
-    try {
-      const scripts = doc.querySelectorAll('script:not([src])');
-      for (const script of scripts) {
-        const content = script.textContent || '';
-        if (content.indexOf('__INITIAL_STATE__') < 0) continue;
-        if (!STATE_NOTES_PATTERN.test(content) && content.indexOf('xsecToken') < 0) continue;
-        const found = extractTokensFromState(content);
-        for (const key of Object.keys(found)) {
-          if (!map[key]) map[key] = found[key];
-        }
-        if (Object.keys(map).length) break;
+      if (initialState) {
+        const seen = typeof ROOT.WeakSet === 'function' ? new ROOT.WeakSet() : null;
+        collectTokensFromStateObject(initialState, map, 0, seen);
       }
-    } catch (_) {
-      // ignore: callers fall back to a token-less link
-    }
+    } catch (_) {}
     return map;
+  }
+
+  function clearFallbackTokenCache() {
+    fallbackTokenMap = null;
+    fallbackTokenChecked = false;
   }
 
   function getFallbackTokenForNoteId(noteId) {
     if (!noteId) return '';
-    if (fallbackTokenMap && fallbackTokenMap[noteId]) return fallbackTokenMap[noteId];
-    // Rebuild on miss so infinite-scroll notes that arrive after the first parse still resolve.
-    fallbackTokenMap = buildFallbackTokenMap();
-    fallbackTokenChecked = true;
-    return fallbackTokenMap[noteId] || '';
+    if (!fallbackTokenMap) fallbackTokenMap = Object.create(null);
+    // Include negative cache so missing tokens do not rescan the huge state tree on every click.
+    if (Object.prototype.hasOwnProperty.call(fallbackTokenMap, noteId)) return fallbackTokenMap[noteId] || '';
+
+    let token = '';
+    try {
+      const initialState = (PAGE && PAGE.__INITIAL_STATE__) || ROOT.__INITIAL_STATE__;
+      if (initialState) {
+        const seen = typeof ROOT.WeakSet === 'function' ? new ROOT.WeakSet() : null;
+        token = findTokenForNoteIdInState(initialState, noteId, 0, seen);
+      }
+    } catch (_) {}
+
+    if (!token) token = extractTokenForNoteIdFromScriptText(noteId);
+
+    // One-time bulk warm-up only. Never rebuild on every miss (that froze copy-link).
+    if (!token && !fallbackTokenChecked) {
+      fallbackTokenChecked = true;
+      try {
+        const bulk = buildFallbackTokenMap();
+        const keys = Object.keys(bulk);
+        for (let i = 0; i < keys.length; i += 1) {
+          if (!Object.prototype.hasOwnProperty.call(fallbackTokenMap, keys[i])) fallbackTokenMap[keys[i]] = bulk[keys[i]];
+        }
+        if (bulk[noteId]) token = bulk[noteId];
+      } catch (_) {}
+    }
+
+    fallbackTokenMap[noteId] = token || '';
+    return token || '';
   }
 
   function buildShareLink(id, token) {
@@ -397,19 +484,16 @@
     const out = [];
     const push = value => {
       const text = normalizeSpace(value);
-      if (!text) return;
-      if (out.indexOf(text) >= 0) return;
+      if (!text || out.indexOf(text) >= 0) return;
       out.push(text);
     };
-    // Prefer no-watermark first, then the exact displayed URL (often still hotlink-signed).
-    push(normalized);
+    // Signed/displayed URL first, then de-processed, then one derivative max.
     push(original);
-    // Some CDN object keys only serve processed derivatives; rebuild common web variants.
-    if (normalized && normalized === original && !/!/.test(normalized.split('?')[0])) {
-      push(normalized.replace(/([?].*)?$/, '!nd_dft_wlteh_webp_3$1'));
-      push(normalized.replace(/([?].*)?$/, '!nd_prv_wlteh_webp_3$1'));
+    push(normalized);
+    if (normalized && !/!/.test(normalized.split("?")[0])) {
+      push(normalized.replace(/([?].*)?$/, "!nd_dft_wlteh_webp_3$1"));
     }
-    return out;
+    return out.slice(0, 3);
   }
 
   function coverRequestHeaders() {
@@ -582,59 +666,17 @@
   function blobToPngBlob(blob) {
     if (!blob) return Promise.resolve(null);
     if (blob.type === "image/png") return transferBlobToPage(blob);
-    // Prefer createImageBitmap to avoid extra blob: network noise from <img src=blob:>.
+    // Prefer createImageBitmap; avoids blob: object-URL noise in DevTools.
     if (typeof ROOT.createImageBitmap === "function") {
-      return ROOT.createImageBitmap(blob).then(bitmap => {
-        try {
-          const canvas = ROOT.document.createElement("canvas");
-          canvas.width = bitmap.width;
-          canvas.height = bitmap.height;
-          if (!canvas.width || !canvas.height) {
-            try { bitmap.close(); } catch (_) {}
-            return transferBlobToPage(blob);
-          }
-          const ctx = canvas.getContext("2d");
-          ctx.drawImage(bitmap, 0, 0);
-          try { bitmap.close(); } catch (_) {}
-          if (typeof canvas.toBlob === "function") {
-            return new Promise(resolve => {
-              canvas.toBlob(out => {
-                if (!out) { resolve(transferBlobToPage(blob)); return; }
-                transferBlobToPage(out).then(resolve, () => resolve(out));
-              }, "image/png");
-            });
-          }
-          return Promise.resolve(dataUrlToBlob(canvas.toDataURL("image/png"), "image/png"));
-        } catch (_) {
-          try { bitmap.close(); } catch (e2) {}
-          return transferBlobToPage(blob);
-        }
-      }, () => transferBlobToPage(blob));
+      return ROOT.createImageBitmap(blob).then(bitmap => canvasToPngBlob(bitmap).then(png => {
+        try { bitmap.close(); } catch (_) {}
+        return png || transferBlobToPage(blob);
+      }, () => {
+        try { bitmap.close(); } catch (_) {}
+        return transferBlobToPage(blob);
+      }), () => transferBlobToPage(blob));
     }
-    return new Promise(resolve => {
-      try {
-        if (!ROOT.URL || typeof ROOT.URL.createObjectURL !== "function" || typeof ROOT.Image !== "function") {
-          resolve(transferBlobToPage(blob));
-          return;
-        }
-        const objectUrl = ROOT.URL.createObjectURL(blob);
-        const img = new ROOT.Image();
-        img.onload = () => {
-          canvasToPngBlob(img).then(png => {
-            try { ROOT.URL.revokeObjectURL(objectUrl); } catch (_) {}
-            if (png) resolve(png);
-            else transferBlobToPage(blob).then(resolve, () => resolve(blob));
-          });
-        };
-        img.onerror = () => {
-          try { ROOT.URL.revokeObjectURL(objectUrl); } catch (_) {}
-          transferBlobToPage(blob).then(resolve, () => resolve(blob));
-        };
-        img.src = objectUrl;
-      } catch (_) {
-        transferBlobToPage(blob).then(resolve, () => resolve(blob));
-      }
-    });
+    return transferBlobToPage(blob);
   }
 
   // IMPORTANT: call clipboard.write during the click gesture, with Promise values inside
@@ -678,12 +720,6 @@
     }
   }
 
-  function copyImage(dataUrl, mimeType) {
-    const blob = dataUrlToBlob(dataUrl, mimeType || "image/png");
-    if (!blob) return Promise.resolve(false);
-    return copyImageBlob(blob);
-  }
-
   function guessImageMimeFromUrl(url) {
     const text = String(url || "").toLowerCase();
     if (text.indexOf(".png") >= 0) return "image/png";
@@ -725,9 +761,19 @@
 
   function getCachedCoverBlob(url) {
     const key = normalizeSpace(url);
-    if (!key) return null;
+    if (!key || !coverBlobCache.has(key)) return null;
     const hit = coverBlobCache.get(key);
     return hit && typeof hit.size === "number" ? hit : null;
+  }
+
+  function cacheCoverMiss(url) {
+    const key = normalizeSpace(url);
+    if (key) coverBlobCache.set(key, false);
+  }
+
+  function isCoverMiss(url) {
+    const key = normalizeSpace(url);
+    return key ? coverBlobCache.get(key) === false : false;
   }
 
   // Never page-fetch remote CDN images.
@@ -767,52 +813,26 @@
   }
 
   function gmFetchCoverBlob(url) {
-    if (!url || /^(?:data:|blob:)/i.test(url)) return Promise.resolve(null);
-    if (!getGmRequest()) return Promise.resolve(null);
+    if (!url || /^(?:data:|blob:)/i.test(url) || !getGmRequest() || isCoverMiss(url)) return Promise.resolve(null);
+    const cached = getCachedCoverBlob(url);
+    if (cached) return Promise.resolve(cached);
     return gmRequestOnce(url, "blob").then(raw => {
-      if (raw && (typeof raw.size === "number")) {
+      if (raw && typeof raw.size === "number") {
         const blob = normalizeFetchedImageBlob(raw, url);
-        if (blob) return blob;
+        if (blob) { cacheCoverBlob(url, blob); return blob; }
       }
       return gmRequestOnce(url, "arraybuffer").then(buf => {
-        if (!buf) return null;
+        if (!buf) { cacheCoverMiss(url); return null; }
         try {
           const view = buf instanceof ROOT.ArrayBuffer ? new ROOT.Uint8Array(buf) : new ROOT.Uint8Array(buf.buffer || buf);
-          if (view.byteLength < 32) return null;
-          if (!looksLikeImageBytes(view)) return null;
+          if (view.byteLength < 32 || !looksLikeImageBytes(view)) { cacheCoverMiss(url); return null; }
           const BlobCtor = getPageBlobCtor() || ROOT.Blob;
-          return new BlobCtor([view], { type: guessImageMimeFromUrl(url) });
-        } catch (_) { return null; }
+          const blob = new BlobCtor([view], { type: guessImageMimeFromUrl(url) });
+          cacheCoverBlob(url, blob);
+          return blob;
+        } catch (_) { cacheCoverMiss(url); return null; }
       });
     });
-  }
-
-  function loadCoverViaImage(url) {
-    return new Promise(resolve => {
-      try {
-        if (typeof ROOT.Image !== "function") { resolve(null); return; }
-        if (/^data:/i.test(url)) { resolve(dataUrlToBlob(url, "image/png")); return; }
-        if (!/^blob:/i.test(url)) { resolve(null); return; }
-        const img = new ROOT.Image();
-        let settled = false;
-        const finish = value => { if (!settled) { settled = true; resolve(value); } };
-        img.onload = () => { canvasToPngBlob(img).then(finish); };
-        img.onerror = () => finish(null);
-        img.src = url;
-      } catch (_) { resolve(null); }
-    });
-  }
-
-  function loadCoverFromCardImage(card) {
-    if (!card || !card.querySelector) return Promise.resolve(null);
-    try {
-      const images = card.querySelectorAll(COVER_IMAGE_SELECTORS);
-      for (const img of images) {
-        if (!img || !(img.naturalWidth || img.width) || !(img.naturalHeight || img.height)) continue;
-        return canvasToPngBlob(img).then(blob => blob || null, () => null);
-      }
-    } catch (_) {}
-    return Promise.resolve(null);
   }
 
   function resolveCoverBlobFromCandidates(candidates) {
@@ -820,65 +840,16 @@
     for (const url of candidates) {
       chain = chain.then(prev => {
         if (prev) return prev;
-        const cached = getCachedCoverBlob(url);
-        if (cached) return cached;
-        return gmFetchCoverBlob(url).then(viaGm => {
-          if (!viaGm) return null;
-          cacheCoverBlob(url, viaGm);
-          return viaGm;
-        }).then(png => {
-          if (png) return png;
-          return fetchCoverBlob(url).then(viaFetch => {
-            if (!viaFetch) return null;
-            cacheCoverBlob(url, viaFetch);
-            return viaFetch;
-          });
-        }).then(png => {
-          if (png) return png;
-          return loadCoverViaImage(url);
-        });
+        if (/^(?:data:|blob:)/i.test(url)) return fetchCoverBlob(url);
+        return gmFetchCoverBlob(url);
       });
     }
     return chain;
   }
 
-  // Soft prefetch only the first visible candidate; no blob: transcode during prefetch.
-  function prefetchCardCover(card) {
-    try {
-      if (!getGmRequest()) return;
-      const src = extractCoverUrl(card);
-      if (!src || /^(?:data:|blob:)/i.test(src)) return;
-      const primary = coverUrlCandidates(src)[0];
-      if (!primary || getCachedCoverBlob(primary) || coverBlobCache.has(primary + "#pending")) return;
-      coverBlobCache.set(primary + "#pending", true);
-      gmFetchCoverBlob(primary).then(blob => {
-        coverBlobCache.delete(primary + "#pending");
-        if (blob) cacheCoverBlob(primary, blob);
-      }, () => { coverBlobCache.delete(primary + "#pending"); });
-    } catch (_) {}
-  }
-
-  function loadCoverPngBlob(src, card) {
-    const candidates = coverUrlCandidates(src);
-    return loadCoverFromCardImage(card).then(fromDom => {
-      if (fromDom) return fromDom;
-      return resolveCoverBlobFromCandidates(candidates);
-    }).then(blob => (blob ? { ok: true, blob, mimeType: blob.type || "image/png" } : { ok: false }));
-  }
-
-  function loadCoverDataUrl(src) {
-    return loadCoverPngBlob(src).then(result => {
-      if (!result.ok || !result.blob) return { ok: false };
-      return new Promise(resolve => {
-        try {
-          if (typeof ROOT.FileReader !== "function") { resolve({ ok: false }); return; }
-          const reader = new ROOT.FileReader();
-          reader.onload = () => resolve({ ok: true, dataUrl: String(reader.result || ""), mimeType: "image/png" });
-          reader.onerror = () => resolve({ ok: false });
-          reader.readAsDataURL(result.blob);
-        } catch (_) { resolve({ ok: false }); }
-      });
-    });
+  function loadCoverPngBlob(src) {
+    return resolveCoverBlobFromCandidates(coverUrlCandidates(src))
+      .then(blob => (blob ? { ok: true, blob, mimeType: blob.type || "image/png" } : { ok: false }));
   }
 
   function onCopyLink(card) {
@@ -888,18 +859,22 @@
   }
 
   function onCopyCover(card) {
+    if (copyCoverInFlight) return;
     const src = extractCoverUrl(card);
     if (!src) { showCopyStatus(COPY_COVER_FAIL); return; }
-    // Start clipboard write in the same turn as the click (Promise ClipboardItem),
-    // so the async GM download still counts as user-activated.
-    const blobPromise = loadCoverPngBlob(src, card).then(result => {
+    copyCoverInFlight = true;
+    // clipboard.write starts in this turn; Promise ClipboardItem keeps user-activation.
+    const blobPromise = loadCoverPngBlob(src).then(result => {
       if (!result.ok || !result.blob) throw new Error("cover-load-failed");
       return result.blob;
     });
     copyImageBlobPromise(blobPromise).then(copied => {
-      if (copied) showCopyStatus(COPY_COVER_OK);
-      else showCopyStatus(getGmRequest() ? COPY_COVER_FAIL : (COPY_COVER_FAIL + "???????"));
-    }, () => showCopyStatus(COPY_COVER_FAIL));
+      copyCoverInFlight = false;
+      showCopyStatus(copied ? COPY_COVER_OK : (getGmRequest() ? COPY_COVER_FAIL : COPY_COVER_AUTH_FAIL));
+    }, () => {
+      copyCoverInFlight = false;
+      showCopyStatus(getGmRequest() ? COPY_COVER_FAIL : COPY_COVER_AUTH_FAIL);
+    });
   }
 
   function ensureCardActions(card) {
@@ -928,7 +903,6 @@
       card.appendChild(container);
     }
     card.setAttribute(CARD_ACTIONS_ATTRIBUTE, getCurrentRoute());
-    prefetchCardCover(card);
   }
 
   function removeCardActions(card) {
@@ -1234,6 +1208,7 @@
     const url = ROOT.location ? ROOT.location.href : getCurrentRoute();
     if (url !== lastUrl) {
       lastUrl = url;
+      clearFallbackTokenCache();
       if (!isTargetRoute(getCurrentRoute())) cleanupAll();
       else for (const card of discoverCards(ROOT.document)) pending.add(card);
     }
@@ -1322,8 +1297,7 @@
     if (destroyed) return;
     counters.routeSignals += 1;
     lastUrl = '';
-    fallbackTokenMap = null;
-    fallbackTokenChecked = false;
+    clearFallbackTokenCache();
     scan(ROOT.document);
     schedule();
   }
@@ -1408,8 +1382,8 @@
 
   const pureApi = Object.freeze({
     parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, isProfileRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
-    getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue, extractTokensFromState,
-    toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, coverRequestHeaders, getGmRequest, pickLargestFromSrcset,
+    getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue, extractTokensFromState, findTokenForNoteIdInState, getFallbackTokenForNoteId, clearFallbackTokenCache,
+    toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, coverRequestHeaders, pickLargestFromSrcset,
     READ_ATTRIBUTES, SELECTORS
   });
 

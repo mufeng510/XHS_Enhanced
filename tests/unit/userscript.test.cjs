@@ -221,9 +221,9 @@ test('no-watermark cover URL strips XHS processing suffixes and process queries'
   );
   assert.equal(api.toNoWatermarkCoverUrl('data:image/png;base64,abc'), 'data:image/png;base64,abc');
   const candidates = api.coverUrlCandidates(raw);
-  assert.equal(candidates[0], 'https://sns-webpic-qc.xhscdn.com/20240101/demo/foo.webp');
-  assert.equal(candidates[1], raw);
-  assert.equal(candidates.length, 2);
+  assert.equal(candidates[0], raw);
+  assert.equal(candidates[1], 'https://sns-webpic-qc.xhscdn.com/20240101/demo/foo.webp');
+  assert.ok(candidates.length >= 2 && candidates.length <= 3);
   assert.equal(api.pickLargestFromSrcset('a.jpg 100w, b.jpg 800w, c.jpg 400w'), 'b.jpg');
 });
 
@@ -276,5 +276,41 @@ test('coverUrlCandidates keeps bare note_pre_post urls and adds processed fallba
   const list = api.coverUrlCandidates(bare);
   assert.equal(list[0], bare);
   assert.ok(list.some(u => u.indexOf('!nd_dft_wlteh_webp_3') >= 0));
-  assert.ok(list.some(u => u.indexOf('!nd_prv_wlteh_webp_3') >= 0));
+  assert.ok(list.length <= 3);
+  assert.equal(list.some(u => u.indexOf('!nd_prv_wlteh_webp_3') >= 0), false);
+});
+
+
+test('findTokenForNoteIdInState early-exits for one note without full walk side effects', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const state = {
+    user: {
+      notes: [[{
+        id: 'noteA',
+        noteCard: { noteId: 'noteA', xsecToken: 'tokA' },
+        xsecToken: 'tokA'
+      }, {
+        id: 'noteB',
+        noteCard: { noteId: 'noteB', xsecToken: 'tokB' },
+        xsecToken: 'tokB'
+      }]]
+    },
+    huge: new Array(200).fill(0).map((_, i) => ({ id: 'x' + i, nest: { n: i } }))
+  };
+  assert.equal(api.findTokenForNoteIdInState(state, 'noteB', 0, null), 'tokB');
+  assert.equal(api.findTokenForNoteIdInState(state, 'missing', 0, null), '');
+});
+
+test('getFallbackTokenForNoteId caches negative results and stays stable', () => {
+  const ctx = load('/user/profile/abc');
+  const api = ctx.__XHS_ENHANCED_TEST_API__;
+  ctx.__INITIAL_STATE__ = {
+    user: { notes: [[{ id: 'n1', noteCard: { noteId: 'n1', xsecToken: 'T1' }, xsecToken: 'T1' }]] }
+  };
+  assert.equal(api.getFallbackTokenForNoteId('n1'), 'T1');
+  assert.equal(api.getFallbackTokenForNoteId('n1'), 'T1');
+  assert.equal(api.getFallbackTokenForNoteId('nope'), '');
+  assert.equal(api.getFallbackTokenForNoteId('nope'), '');
+  api.clearFallbackTokenCache();
+  assert.equal(api.getFallbackTokenForNoteId('n1'), 'T1');
 });

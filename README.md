@@ -9,7 +9,7 @@
 - 同时高亮卡片内的点赞数；
 - 页面右上角提供“下一条热门笔记”悬浮按钮，跳过当前可见内容并平滑滚动到下方最近的热门笔记；
 - 没有下一条热门笔记时滚动到页面底部并提示，后续动态加载热门笔记后仍可继续跳转；
-- **用户主页每个笔记卡片悬浮显示“复制链接”“复制封面”按钮**：复制链接写入 `https://www.xiaohongshu.com/explore/<id>?xsec_token=<token>&xsec_source=pc_feed` 格式的分享链接（`xsec_token` 优先取自笔记卡片自身的 `href`，缺失时回退到页面 `window.__INITIAL_STATE__`，均无则使用裸链接）；复制封面将**无水印**笔记封面图片写入剪贴板（自动去掉 CDN `!nd_*` 等处理后缀；通过页面 CORS 或 `GM_xmlhttpRequest` 拉取图片字节；受剪贴板权限限制时给出失败提示，不阻断页面）；
+- **用户主页每个笔记卡片悬浮显示“复制链接”“复制封面”按钮**：复制链接写入 `https://www.xiaohongshu.com/explore/<id>?xsec_token=<token>&xsec_source=pc_feed` 格式的分享链接（`xsec_token` 优先取自笔记卡片自身的 `href`，缺失时回退到页面 `window.__INITIAL_STATE__`，均无则使用裸链接）；复制封面将**无水印**笔记封面图片写入剪贴板（自动去掉 CDN `!nd_*` 等处理后缀；通过页面 CORS 或 `GM_xmlhttpRequest` 拉取图片字节；受剪贴板权限限制时给出失败提示，不阻断页面；仅在点击复制时通过油猴请求图片，网络面板里偶发的 blob:chrome-extension:// 条目来自扩展沙箱，不是站点接口）；
 - 自动处理首屏内容、无限滚动新增内容、属性更新和站内 SPA 导航；
 - 不展示或推断笔记发布时间。
 
