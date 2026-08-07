@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.3.3
+// @version      1.3.4
 // @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；用户主页每个笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
@@ -389,11 +389,35 @@
   function coverUrlCandidates(raw) {
     const original = normalizeSpace(raw);
     if (!original) return [];
+    if (/^(?:data:|blob:)/i.test(original)) return [original];
     const normalized = toNoWatermarkCoverUrl(original);
     const out = [];
-    if (normalized) out.push(normalized);
-    if (original && original !== normalized) out.push(original);
+    const push = value => {
+      const text = normalizeSpace(value);
+      if (!text) return;
+      if (out.indexOf(text) >= 0) return;
+      out.push(text);
+    };
+    // Prefer no-watermark first, then the exact displayed URL (often still hotlink-signed).
+    push(normalized);
+    push(original);
+    // Some CDN object keys only serve processed derivatives; rebuild common web variants.
+    if (normalized && normalized === original && !/!/.test(normalized.split('?')[0])) {
+      push(normalized.replace(/([?].*)?$/, '!nd_dft_wlteh_webp_3$1'));
+      push(normalized.replace(/([?].*)?$/, '!nd_prv_wlteh_webp_3$1'));
+    }
     return out;
+  }
+
+  function coverRequestHeaders() {
+    const referer = (PAGE.location && PAGE.location.origin)
+      ? (PAGE.location.origin + '/')
+      : 'https://www.xiaohongshu.com/';
+    return {
+      Referer: referer,
+      Origin: referer.replace(/\/$/, ''),
+      Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
+    };
   }
 
   function clearCopyStatus() {
@@ -531,19 +555,36 @@
     });
   }
 
+  function guessImageMimeFromUrl(url) {
+    const text = String(url || '').toLowerCase();
+    if (text.indexOf('.png') >= 0) return 'image/png';
+    if (text.indexOf('.webp') >= 0 || text.indexOf('webp') >= 0) return 'image/webp';
+    if (text.indexOf('.gif') >= 0) return 'image/gif';
+    return 'image/jpeg';
+  }
+
+  function normalizeFetchedImageBlob(blob, url) {
+    if (!blob || typeof blob.size !== 'number' || blob.size < 32) return null;
+    if (blob.type && /^image\//i.test(blob.type)) return blob;
+    return blob.slice(0, blob.size, guessImageMimeFromUrl(url));
+  }
+
+  // Page fetch/cors often 403s on xhscdn anti-hotlink; keep as late fallback only.
   function fetchCoverBlob(url) {
     if (!url || typeof ROOT.fetch !== 'function') return Promise.resolve(null);
     if (/^data:/i.test(url)) return Promise.resolve(dataUrlToBlob(url, 'image/png'));
     if (/^blob:/i.test(url)) {
       return ROOT.fetch(url).then(res => (res && res.ok ? res.blob() : null), () => null);
     }
-    return ROOT.fetch(url, { mode: 'cors', credentials: 'omit', cache: 'force-cache' })
+    return ROOT.fetch(url, {
+      mode: 'cors',
+      credentials: 'include',
+      cache: 'force-cache',
+      referrer: (PAGE.location && PAGE.location.href) || 'https://www.xiaohongshu.com/',
+      referrerPolicy: 'strict-origin-when-cross-origin'
+    })
       .then(res => (res && res.ok ? res.blob() : null), () => null)
-      .then(blob => {
-        if (!blob) return null;
-        if (blob.type && /^image\//i.test(blob.type)) return blob;
-        return blob.size > 32 ? blob.slice(0, blob.size, 'image/jpeg') : null;
-      });
+      .then(blob => normalizeFetchedImageBlob(blob, url));
   }
 
   function gmFetchCoverBlob(url) {
@@ -554,20 +595,38 @@
         || (ROOT.GM && typeof ROOT.GM.xmlHttpRequest === 'function' && ROOT.GM.xmlHttpRequest)
         || null;
       if (typeof req !== 'function') { resolve(null); return; }
+      const headers = coverRequestHeaders();
+      const finishBlob = raw => {
+        if (!raw) { resolve(null); return; }
+        try {
+          if (raw instanceof ROOT.Blob || (raw && typeof raw.size === 'number' && typeof raw.type === 'string')) {
+            resolve(normalizeFetchedImageBlob(raw, url));
+            return;
+          }
+          // arraybuffer / typed array responses
+          if (raw && (raw.byteLength >= 0 || raw.buffer)) {
+            const view = raw instanceof ROOT.ArrayBuffer ? new ROOT.Uint8Array(raw) : new ROOT.Uint8Array(raw.buffer || raw);
+            if (view.byteLength < 32) { resolve(null); return; }
+            resolve(new ROOT.Blob([view], { type: guessImageMimeFromUrl(url) }));
+            return;
+          }
+          resolve(null);
+        } catch (_) { resolve(null); }
+      };
       try {
         req({
           method: 'GET',
           url,
-          responseType: 'blob',
-          anonymous: true,
+          // Prefer arraybuffer for broad TM compatibility, then wrap as image blob.
+          responseType: 'arraybuffer',
+          // Keep cookies if the manager provides them; anti-hotlink often wants site context.
+          anonymous: false,
           timeout: 20000,
+          headers,
           onload(res) {
             try {
-              if (!res || res.status < 200 || res.status >= 300 || !res.response) { resolve(null); return; }
-              const blob = res.response;
-              if (!blob || typeof blob.size !== 'number') { resolve(null); return; }
-              if (blob.type && /^image\//i.test(blob.type)) { resolve(blob); return; }
-              resolve(blob.size > 32 ? new ROOT.Blob([blob], { type: 'image/jpeg' }) : null);
+              if (!res || res.status < 200 || res.status >= 300) { resolve(null); return; }
+              finishBlob(res.response);
             } catch (_) { resolve(null); }
           },
           onerror() { resolve(null); },
@@ -577,40 +636,60 @@
     });
   }
 
+  // Avoid crossOrigin=anonymous on remote CDN: it switches the request into a CORS
+  // mode that xhscdn frequently answers with 403 even when normal <img> loads fine.
   function loadCoverViaImage(url) {
     return new Promise(resolve => {
       try {
         if (typeof ROOT.Image !== 'function') { resolve(null); return; }
         if (/^data:/i.test(url)) { resolve(dataUrlToBlob(url, 'image/png')); return; }
+        // Remote images without CORS cannot be exported from canvas; skip noisy attempts.
+        if (!/^(?:blob:)/i.test(url)) { resolve(null); return; }
         const img = new ROOT.Image();
         let settled = false;
         const finish = value => { if (!settled) { settled = true; resolve(value); } };
         img.onload = () => { canvasToPngBlob(img).then(finish); };
         img.onerror = () => finish(null);
-        try { img.crossOrigin = 'anonymous'; } catch (_) {}
         img.src = url;
       } catch (_) { resolve(null); }
     });
   }
 
-  function loadCoverPngBlob(src) {
+  function loadCoverFromCardImage(card) {
+    if (!card || !card.querySelector) return Promise.resolve(null);
+    try {
+      const images = card.querySelectorAll(COVER_IMAGE_SELECTORS);
+      for (const img of images) {
+        if (!img || !(img.naturalWidth || img.width) || !(img.naturalHeight || img.height)) continue;
+        // Only works when the image is same-origin/data/blob or already CORS-clean.
+        return canvasToPngBlob(img).then(blob => blob || null, () => null);
+      }
+    } catch (_) {}
+    return Promise.resolve(null);
+  }
+
+  function loadCoverPngBlob(src, card) {
     const candidates = coverUrlCandidates(src);
-    let chain = Promise.resolve(null);
+    // 1) DOM canvas (rarely works cross-origin, zero network)
+    // 2) GM + Referer (bypasses page CORS / anti-hotlink better than fetch)
+    // 3) fetch fallback
+    // 4) blob:/data: image path
+    let chain = loadCoverFromCardImage(card);
     for (const url of candidates) {
       chain = chain.then(prev => {
         if (prev) return prev;
-        return fetchCoverBlob(url).then(viaFetch => {
-          if (viaFetch) return blobToPngBlob(viaFetch).then(png => png || null);
+        return gmFetchCoverBlob(url).then(viaGm => {
+          if (viaGm) return blobToPngBlob(viaGm).then(png => png || viaGm);
           return null;
         }).then(png => {
           if (png) return png;
-          return loadCoverViaImage(url);
-        }).then(viaImage => {
-          if (viaImage) return viaImage;
-          return gmFetchCoverBlob(url).then(viaGm => {
-            if (!viaGm) return null;
-            return blobToPngBlob(viaGm);
+          return fetchCoverBlob(url).then(viaFetch => {
+            if (viaFetch) return blobToPngBlob(viaFetch).then(p => p || viaFetch);
+            return null;
           });
+        }).then(png => {
+          if (png) return png;
+          return loadCoverViaImage(url);
         });
       });
     }
@@ -641,7 +720,7 @@
   function onCopyCover(card) {
     const src = extractCoverUrl(card);
     if (!src) { showCopyStatus(COPY_COVER_FAIL); return; }
-    loadCoverPngBlob(src).then(result => {
+    loadCoverPngBlob(src, card).then(result => {
       if (!result.ok || !result.blob) { showCopyStatus(COPY_COVER_FAIL); return; }
       copyImageBlob(result.blob).then(copied => showCopyStatus(copied ? COPY_COVER_OK : COPY_COVER_FAIL));
     }, () => showCopyStatus(COPY_COVER_FAIL));
@@ -1153,7 +1232,7 @@
   const pureApi = Object.freeze({
     parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, isProfileRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
     getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue, extractTokensFromState,
-    toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, pickLargestFromSrcset,
+    toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, coverRequestHeaders, pickLargestFromSrcset,
     READ_ATTRIBUTES, SELECTORS
   });
 

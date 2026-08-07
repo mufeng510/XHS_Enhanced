@@ -262,3 +262,20 @@ test('extractCoverUrl reads first real cover candidate from card images', () => 
   assert.equal(api.extractCoverUrl(card), 'https://sns-webpic-qc.xhscdn.com/note/cover.webp!nd_dft_wlteh_webp_3');
   assert.equal(api.extractCoverUrl({ querySelectorAll: () => [] }), '');
 });
+
+test('coverRequestHeaders returns xiaohongshu referer', () => {
+  const api = load('/user/profile/abc').__XHS_ENHANCED_TEST_API__;
+  const headers = api.coverRequestHeaders();
+  assert.equal(headers.Referer, 'https://www.xiaohongshu.com/');
+  assert.equal(headers.Origin, 'https://www.xiaohongshu.com');
+  assert.ok(headers.Accept && headers.Accept.indexOf('image/') >= 0);
+});
+
+test('coverUrlCandidates keeps bare note_pre_post urls and adds processed fallbacks', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const bare = 'https://sns-webpic-qc.xhscdn.com/202608071123/a9c1e390ff7f07b61ce850daf65b7a40/note_pre_post_uhdr/1040g3r03220lne1mmu1049s0ismhjq9d8um703o';
+  const list = api.coverUrlCandidates(bare);
+  assert.equal(list[0], bare);
+  assert.ok(list.some(u => u.indexOf('!nd_dft_wlteh_webp_3') >= 0));
+  assert.ok(list.some(u => u.indexOf('!nd_prv_wlteh_webp_3') >= 0));
+});
