@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.4.1
+// @version      1.5.0
 // @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面；一键把笔记链接发送到自建 XHS_ALL_IN_ONE 内容库保存
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
@@ -74,7 +74,7 @@
   const LIBRARY_REFRESH_KEY = 'xhs-enhanced:library-refresh-token';
   const LIBRARY_CRAWL_PATH = '/api/xhs/crawl/note-urls';
   const LIBRARY_BATCH_LIMIT = 50;
-  const DETAIL_ROUTE_PATTERN = /^\/(?:explore|discovery\/item)\/[A-Za-z0-9]+$/;
+  const DETAIL_ROUTE_PATTERN = /^\/(?:explore|discovery\/item|search_result)\/[A-Za-z0-9]+$|^\/user\/profile\/[A-Za-z0-9]+\/[A-Za-z0-9]+$/;
   const SAVE_LIBRARY_CLASS = 'xhs-enhanced-save-library';
   const SAVE_LIBRARY_TEXT = '保存入库';
   const SAVE_LIBRARY_DONE_TEXT = '已入库';
@@ -101,7 +101,7 @@
   const LIBRARY_AUTH_FAIL = '内容库登录失败，请检查用户名与密码';
   const LIBRARY_CONNECT_FAIL = '无法连接内容库服务';
   const LIBRARY_GM_MISSING = '需油猴授权（GM_xmlhttpRequest）';
-  const NOTE_ID_PATTERN = /\/(?:explore|discovery\/item)\/([A-Za-z0-9]+)/;
+  const NOTE_ID_PATTERN = /\/(?:explore|discovery\/item|search_result)\/([A-Za-z0-9]+)/;
   // Real __INITIAL_STATE__ uses camelCase xsecToken; noteCard often has noteId next to xsecToken.
   const NOTE_ID_THEN_TOKEN_PATTERN = /"noteId"\s*:\s*"([0-9a-fA-F]+)"\s*,\s*"xsecToken"\s*:\s*"([^"]+)"/g;
   const TOKEN_THEN_NOTE_ID_PATTERN = /"xsecToken"\s*:\s*"([^"]+)"(?:(?!"xsecToken"\s*:)[\s\S]){0,1200}?"noteId"\s*:\s*"([0-9a-fA-F]+)"/g;
@@ -109,7 +109,7 @@
   const STATE_NOTES_PATTERN = /"notes"\s*:\s*\[/;
 
   const SELECTORS = Object.freeze({
-    noteLinks: 'a[href*="/explore/"],a[href*="/discovery/item/"]',
+    noteLinks: 'a[href*="/explore/"],a[href*="/discovery/item/"],a[href*="/search_result/"]',
     cardContainers: '[data-note-card],article.note-item,section.note-item,.note-item',
     likeNodes: '[data-like-count],[data-xhs-like-count],[aria-label*="点赞"],[title*="点赞"],.like-wrapper .count,.like-count',
     contentRoots: '[data-note-list],.feeds-page,.note-list,main'
@@ -296,8 +296,11 @@
   }
 
   function isTargetRoute(pathname) {
-    const path = String(pathname || '').split('?')[0];
-    return path === '/search_result' || path.startsWith('/user/profile/');
+    // Home feed (/explore), search result list and user profile pages carry note
+    // cards; /explore/<id> etc. are note detail views and are excluded by the
+    // exact match.
+    const path = String(pathname || '').split('?')[0].replace(/\/+$/, '');
+    return path === '/search_result' || path === '/explore' || path.startsWith('/user/profile/');
   }
 
   function isProfileRoute(pathname) {
@@ -1870,16 +1873,18 @@
   function syncLibraryUi() {
     if (!ROOT.document || !ROOT.document.body) return;
     const route = getCurrentRoute();
+    if (isDetailRoute(route)) {
+      // Note detail views (also the nested search/profile modal URLs) get the
+      // floating save button instead of the card-level tools.
+      ensureLibraryToggle();
+      ensureLibraryPageButton();
+      removeLibraryBatchButton();
+      return;
+    }
     if (isTargetRoute(route)) {
       ensureLibraryToggle();
       ensureLibraryBatchButton();
       removeLibraryPageButton();
-      return;
-    }
-    if (isDetailRoute(route)) {
-      ensureLibraryToggle();
-      ensureLibraryPageButton();
-      removeLibraryBatchButton();
       return;
     }
     removeLibraryUi();

@@ -269,7 +269,7 @@
       assert(!document.getElementById('xhs-enhanced-library-page'), 'detail save button removed on target route');
 
       const batchA = makeCard('batcha0000000000000000a1', 101); batchA.querySelector('a').href = '/explore/batcha0000000000000000a1?xsec_token=ta&xsec_source=pc_feed';
-      const batchB = makeCard('batchb0000000000000000b2', 101); batchB.querySelector('a').href = '/explore/batchb0000000000000000b2?xsec_token=tb&xsec_source=pc_feed';
+      const batchB = makeCard('batchb0000000000000000b2', 101); batchB.querySelector('a').href = '/search_result/batchb0000000000000000b2?xsec_token=tb&xsec_source=pc_search';
       sandbox.replaceChildren(batchA, batchB);
       await checkpoint();
       gmCalls.length = 0;
@@ -279,6 +279,16 @@
       const expectedBatch = 'https://www.xiaohongshu.com/explore/batcha0000000000000000a1?xsec_token=ta&xsec_source=pc_feed|https://www.xiaohongshu.com/explore/batchb0000000000000000b2?xsec_token=tb&xsec_source=pc_feed';
       assert(batchBody.urls.join('|') === expectedBatch, 'batch collects deduped share links from visible cards', batchBody.urls.join('|'));
       assert(document.getElementById('xhs-enhanced-copy-status').textContent.indexOf('本页入库完成') === 0, 'batch summary toast');
+
+      // Home feed route gets the same card-level tools.
+      api.setTestRoute('/explore'); await checkpoint();
+      assert(document.getElementById('xhs-enhanced-library-batch'), 'batch save button present on home feed route');
+      assert(card('batcha0000000000000000a1').querySelector('.xhs-enhanced-save-library'), 'home feed route keeps card save actions');
+
+      // Search detail modal URL shows the floating save button.
+      api.clearTestRoute(); await checkpoint();
+      history.pushState({}, '', '/search_result/det1?xsec_token=tok&xsec_source=pc_search'); await checkpoint();
+      assert(document.getElementById('xhs-enhanced-library-page'), 'search detail modal shows floating save button');
 
       const toggle = document.getElementById('xhs-enhanced-library-toggle');
       assert(toggle && toggle.textContent === '内容库设置', 'library settings toggle present');

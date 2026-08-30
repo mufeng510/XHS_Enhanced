@@ -51,7 +51,7 @@ function load(pathname = '/real/path', testMode = true, localStorage) {
 test('route predicate is strict and test seam uses the same gate', () => {
   const c = load('/search_result');
   const api = c.__XHS_ENHANCED_TEST_API__;
-  for (const path of ['/search_result', '/search_result?keyword=test', '/user/profile/abc']) assert.equal(api.isTargetRoute(path), true);
+  for (const path of ['/search_result', '/search_result?keyword=test', '/user/profile/abc', '/explore', '/explore/']) assert.equal(api.isTargetRoute(path), true);
   for (const path of ['/explore/abc', '/', '/user/profiles/abc']) assert.equal(api.isTargetRoute(path), false);
   assert.equal(api.getCurrentRoute(), '/search_result');
   api.setTestRoute('/user/profile/test');
@@ -127,6 +127,7 @@ test('profile route predicate and note id extraction for copy features', () => {
   const get = api.getNoteIdFromHref;
   assert.equal(get('/explore/abc123'), 'abc123');
   assert.equal(get('/discovery/item/abc123'), 'abc123');
+  assert.equal(get('/search_result/abc123'), 'abc123');
   assert.equal(get('https://www.xiaohongshu.com/explore/abc123?xsec_token=t'), 'abc123');
   assert.equal(get('/not_a_note'), '');
   assert.equal(get(''), '');
@@ -330,10 +331,10 @@ test('parseBaseUrl normalizes trailing slashes and rejects non-http schemes', ()
 
 test('detail route predicate accepts note detail paths only', () => {
   const api = load().__XHS_ENHANCED_TEST_API__;
-  for (const path of ['/explore/abc123', '/discovery/item/abc123', '/explore/69952afa000000001b01e949']) {
+  for (const path of ['/explore/abc123', '/discovery/item/abc123', '/explore/69952afa000000001b01e949', '/search_result/abc123', '/user/profile/u1/69952afa000000001b01e949']) {
     assert.equal(api.isDetailRoute(path), true, path);
   }
-  for (const path of ['/explore', '/explore/', '/search_result', '/user/profile/abc', '/explore/abc/extra', '/']) {
+  for (const path of ['/explore', '/explore/', '/search_result', '/user/profile/abc', '/explore/abc/extra', '/', '/user/profile/u1/abc/extra']) {
     assert.equal(api.isDetailRoute(path), false, path);
   }
   assert.equal(api.isTargetRoute('/explore/abc'), false, 'detail routes stay outside scan/target routes');
