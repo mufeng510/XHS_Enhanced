@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.4.0
+// @version      1.4.1
 // @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面；一键把笔记链接发送到自建 XHS_ALL_IN_ONE 内容库保存
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
@@ -22,8 +22,8 @@
 // @run-at       document-idle
 // @homepageURL  https://github.com/mufeng510/XHS_Enhanced
 // @supportURL   https://github.com/mufeng510/XHS_Enhanced/issues
-// @updateURL    https://github.com/mufeng510/XHS_Enhanced/raw/main/xhs-enhanced.user.js
-// @downloadURL  https://github.com/mufeng510/XHS_Enhanced/raw/main/xhs-enhanced.user.js
+// @updateURL    https://github.com/mufeng510/XHS_Enhanced/raw/master/xhs-enhanced.user.js
+// @downloadURL  https://github.com/mufeng510/XHS_Enhanced/raw/master/xhs-enhanced.user.js
 // @license      MIT
 // @author       mufeng510
 // ==/UserScript==
