@@ -87,6 +87,7 @@
       assert(Boolean(container), `profile card has copy actions container: ${name}`);
       assert(container.querySelector('.xhs-enhanced-copy-link').textContent === '复制链接', `profile card copy-link button label: ${name}`);
       assert(container.querySelector('.xhs-enhanced-copy-cover').textContent === '复制封面', `profile card copy-cover button label: ${name}`);
+      assert(container.querySelector('.xhs-enhanced-save-library').textContent === '保存入库', `profile card save-library button label: ${name}`);
     }
     const searchCard = card('profile-100');
     const originalWriteText = navigator.clipboard && navigator.clipboard.writeText;
@@ -151,7 +152,9 @@
       try { delete globalThis.__INITIAL_STATE__; } catch (_) { globalThis.__INITIAL_STATE__ = undefined; }
     }
     api.setTestRoute('/search_result'); await checkpoint();
-    assert(!searchCard.querySelector('.xhs-enhanced-card-actions'), 'leaving profile route removes copy actions from existing cards');
+    assert(Boolean(searchCard.querySelector('.xhs-enhanced-save-library')), 'search route keeps card actions with save-to-library button');
+    api.setTestRoute('/explore/route-clean'); await checkpoint();
+    assert(!searchCard.querySelector('.xhs-enhanced-card-actions'), 'leaving target route removes copy actions from existing cards');
     api.setTestRoute('/user/profile/abc'); await checkpoint();
     assert(Boolean(searchCard.querySelector('.xhs-enhanced-card-actions')), 'returning to profile route restores copy actions');
   }
@@ -185,6 +188,116 @@
     assert(!thresholdControl() && !thresholdStatus(), 'threshold UI is removed outside supported routes');
     api.setTestRoute('/search_result'); await checkpoint();
     assert(document.querySelectorAll('#xhs-enhanced-threshold-control').length === 1, 'threshold UI is restored without duplication');
+  }
+
+  async function librarySync() {
+    api.setTestRoute('/user/profile/abc');
+    const storedKeys = {
+      'xhs-enhanced:library-base-url': 'http://127.0.0.1:8000',
+      'xhs-enhanced:library-username': 'tester',
+      'xhs-enhanced:library-account-id': '7',
+      'xhs-enhanced:library-password': 'secret123'
+    };
+    for (const [key, value] of Object.entries(storedKeys)) localStorage.setItem(key, value);
+    const gmCalls = [];
+    let crawlResponse = { status: 200, body: { saved_count: 1, result_count: 1, errors: [], items: [] } };
+    globalThis.GM_xmlhttpRequest = options => {
+      gmCalls.push(options);
+      let payload;
+      if (options.url.endsWith('/api/auth/login')) {
+        payload = { status: 200, responseText: JSON.stringify({ access_token: 'at', refresh_token: 'rt', token_type: 'bearer', user: { id: 1 } }) };
+      } else if (options.url.endsWith('/api/auth/refresh')) {
+        payload = { status: 200, responseText: JSON.stringify({ access_token: 'at2', token_type: 'bearer' }) };
+      } else if (options.url.endsWith('/api/xhs/crawl/note-urls')) {
+        payload = { status: crawlResponse.status, responseText: JSON.stringify(crawlResponse.body) };
+      } else {
+        payload = { status: 404, responseText: '{}' };
+      }
+      setTimeout(() => options.onload(payload), 0);
+    };
+    const crawlOf = () => gmCalls.find(options => options.url === 'http://127.0.0.1:8000/api/xhs/crawl/note-urls');
+    try {
+      await useFixture('profile-source', '#profile-fixture');
+      api.scan(); await checkpoint();
+      // profile-100 resolves its token from window.__INITIAL_STATE__ (its href has none).
+      globalThis.__INITIAL_STATE__ = {
+        user: {
+          notes: [[{
+            id: 'p1',
+            noteCard: { noteId: 'p1', xsecToken: 'stateTokenP1=', type: 'video' },
+            index: 0, exposed: false, ssrRendered: true, xsecToken: 'stateTokenP1='
+        }]]
+        }
+      };
+      const saveButton = card('profile-101').querySelector('.xhs-enhanced-save-library');
+      assert(saveButton && saveButton.textContent === '保存入库', 'profile card exposes save-to-library button');
+      saveButton.click();
+      await checkpoint(); await checkpoint();
+      const loginCall = gmCalls.find(options => options.url.endsWith('/api/auth/login'));
+      assert(Boolean(loginCall) && JSON.parse(loginCall.data).username === 'tester', 'save flow logs in with stored credentials');
+      const crawlCall = crawlOf();
+      assert(Boolean(crawlCall), 'save flow posts to the crawl endpoint');
+      assert(crawlCall.headers.Authorization === 'Bearer at', 'crawl request carries bearer token');
+      const crawlBody = JSON.parse(crawlCall.data);
+      assert(crawlBody.account_id === 7 && crawlBody.save_to_library === true && crawlBody.fetch_comments === false, 'crawl payload matches the API contract');
+      assert(crawlBody.urls.length === 1 && crawlBody.urls[0] === 'https://www.xiaohongshu.com/explore/p2?xsec_token=hrefTokenP2&xsec_source=pc_feed', 'crawl payload carries the built share link');
+      const toast = document.getElementById('xhs-enhanced-copy-status');
+      assert(toast && toast.textContent === '已保存到内容库', 'save success toast');
+      assert(card('profile-101').querySelector('.xhs-enhanced-save-library').textContent === '已入库', 'save button flips to done state');
+
+      crawlResponse = { status: 200, body: { saved_count: 0, result_count: 0, errors: [{ url: 'u', error: 'XHS note detail crawl failed' }] } };
+      gmCalls.length = 0;
+      card('profile-100').querySelector('.xhs-enhanced-save-library').click();
+      await checkpoint(); await checkpoint();
+      assert(document.getElementById('xhs-enhanced-copy-status').textContent.indexOf('采集失败') === 0, 'crawl failure toast shows server error');
+
+      // Use the REAL location for the detail-page flow (clearTestRoute restores location routing).
+      api.clearTestRoute(); await checkpoint();
+      history.pushState({}, '', '/explore/detail1?xsec_token=tok&xsec_source=pc_search'); await checkpoint();
+      const pageButton = document.getElementById('xhs-enhanced-library-page');
+      assert(pageButton && pageButton.textContent === '保存到内容库', 'detail route shows floating save button');
+      crawlResponse = { status: 200, body: { saved_count: 1, result_count: 1, errors: [] } };
+      gmCalls.length = 0;
+      pageButton.click();
+      await checkpoint(); await checkpoint();
+      const detailCall = crawlOf();
+      const detailBody = JSON.parse(detailCall.data);
+      assert(detailBody.urls.length === 1 && detailBody.urls[0] === location.origin + location.pathname + location.search, 'detail save submits the current page url');
+
+      history.replaceState({}, '', '/search_result'); await checkpoint();
+      assert(document.getElementById('xhs-enhanced-library-batch'), 'batch save button present on target route');
+      assert(!document.getElementById('xhs-enhanced-library-page'), 'detail save button removed on target route');
+
+      const batchA = makeCard('batcha0000000000000000a1', 101); batchA.querySelector('a').href = '/explore/batcha0000000000000000a1?xsec_token=ta&xsec_source=pc_feed';
+      const batchB = makeCard('batchb0000000000000000b2', 101); batchB.querySelector('a').href = '/explore/batchb0000000000000000b2?xsec_token=tb&xsec_source=pc_feed';
+      sandbox.replaceChildren(batchA, batchB);
+      await checkpoint();
+      gmCalls.length = 0;
+      document.getElementById('xhs-enhanced-library-batch').click();
+      await checkpoint(); await checkpoint();
+      const batchBody = JSON.parse(crawlOf().data);
+      const expectedBatch = 'https://www.xiaohongshu.com/explore/batcha0000000000000000a1?xsec_token=ta&xsec_source=pc_feed|https://www.xiaohongshu.com/explore/batchb0000000000000000b2?xsec_token=tb&xsec_source=pc_feed';
+      assert(batchBody.urls.join('|') === expectedBatch, 'batch collects deduped share links from visible cards', batchBody.urls.join('|'));
+      assert(document.getElementById('xhs-enhanced-copy-status').textContent.indexOf('本页入库完成') === 0, 'batch summary toast');
+
+      const toggle = document.getElementById('xhs-enhanced-library-toggle');
+      assert(toggle && toggle.textContent === '内容库设置', 'library settings toggle present');
+      toggle.click(); await checkpoint();
+      const panel = document.getElementById('xhs-enhanced-library-panel');
+      assert(panel && panel.classList.contains('xhs-enhanced-library-panel--open'), 'library panel opens');
+      assert(panel.querySelector('#xhs-enhanced-library-base-input').value === 'http://127.0.0.1:8000', 'panel prefills stored base url');
+      assert(panel.querySelector('#xhs-enhanced-library-account-select'), 'panel exposes account select');
+      panel.querySelector('#xhs-enhanced-library-base-input').value = 'not-a-url';
+      panel.querySelector('.xhs-enhanced-library-panel-actions button').click(); await checkpoint();
+      assert(panel.querySelector('#xhs-enhanced-library-status').textContent.indexOf('服务器地址') === 0, 'invalid base url is rejected with guidance');
+    } finally {
+      delete globalThis.GM_xmlhttpRequest;
+      try { delete globalThis.__INITIAL_STATE__; } catch (_) { globalThis.__INITIAL_STATE__ = undefined; }
+      for (const key of Object.keys(storedKeys)) localStorage.removeItem(key);
+      localStorage.removeItem('xhs-enhanced:library-refresh-token');
+      history.replaceState({}, '', '/search_result');
+      await checkpoint();
+    }
   }
 
   function makeCard(name, value, attribute = 'aria-label') {
@@ -392,6 +505,7 @@
       await initialAndIdempotent();
       await profile();
       await configurableThreshold();
+      await librarySync();
       await dynamicAndAttributes();
       await jumpNavigation();
       await spaRootReplacement();

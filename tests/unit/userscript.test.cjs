@@ -314,3 +314,80 @@ test('getFallbackTokenForNoteId caches negative results and stays stable', () =>
   api.clearFallbackTokenCache();
   assert.equal(api.getFallbackTokenForNoteId('n1'), 'T1');
 });
+
+test('parseBaseUrl normalizes trailing slashes and rejects non-http schemes', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const good = api.parseBaseUrl(' http://127.0.0.1:8000/ ');
+  assert.equal(good.ok, true);
+  assert.equal(good.value, 'http://127.0.0.1:8000');
+  const good2 = api.parseBaseUrl('https://xhs.example.com/api//');
+  assert.equal(good2.ok, true);
+  assert.equal(good2.value, 'https://xhs.example.com/api');
+  for (const value of ['', '   ', 'ftp://x', '127.0.0.1:8000', 'http://', 'javascript:x']) {
+    assert.equal(api.parseBaseUrl(value).ok, false, String(value));
+  }
+});
+
+test('detail route predicate accepts note detail paths only', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  for (const path of ['/explore/abc123', '/discovery/item/abc123', '/explore/69952afa000000001b01e949']) {
+    assert.equal(api.isDetailRoute(path), true, path);
+  }
+  for (const path of ['/explore', '/explore/', '/search_result', '/user/profile/abc', '/explore/abc/extra', '/']) {
+    assert.equal(api.isDetailRoute(path), false, path);
+  }
+  assert.equal(api.isTargetRoute('/explore/abc'), false, 'detail routes stay outside scan/target routes');
+});
+
+test('crawl payload matches the content-library batch API contract', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const payload = api.buildCrawlPayload(7, ['u1', 'u2']);
+  assert.equal(payload.account_id, 7);
+  assert.equal(payload.urls.join('|'), 'u1|u2');
+  assert.equal(payload.save_to_library, true);
+  assert.equal(payload.fetch_comments, false);
+  const coerced = api.buildCrawlPayload('9', ['u1']);
+  assert.equal(coerced.account_id, 9);
+  assert.equal(coerced.urls.join('|'), 'u1');
+  const filtered = api.buildCrawlPayload(1, ['u1', 2, null, '']);
+  assert.equal(filtered.urls.join('|'), 'u1');
+  const nonArray = api.buildCrawlPayload(1, 'u1');
+  assert.equal(nonArray.urls.length, 0);
+});
+
+test('parseTokenExp decodes the unverified JWT payload exp', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const exp = 1900000000;
+  const header = Buffer.from('{"alg":"HS256"}').toString('base64');
+  const payload = Buffer.from(JSON.stringify({ user_id: 1, token_type: 'access', exp })).toString('base64');
+  assert.equal(api.parseTokenExp(`${header}.${payload}.sig`), exp);
+  const urlSafe = Buffer.from(JSON.stringify({ exp })).toString('base64url');
+  assert.equal(api.parseTokenExp(`h.${urlSafe}.sig`), exp);
+  for (const token of ['', 'garbage', 'a.b.c', `${header}.${Buffer.from('not json').toString('base64')}.sig`]) {
+    assert.equal(api.parseTokenExp(token), 0, token);
+  }
+});
+
+test('readLibraryConfig reads keys safely and normalizes base url', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const stored = {
+    getItem(key) {
+      if (key === 'xhs-enhanced:library-base-url') return ' http://127.0.0.1:8000/// ';
+      if (key === 'xhs-enhanced:library-username') return ' tester ';
+      if (key === 'xhs-enhanced:library-account-id') return '7';
+      return null;
+    }
+  };
+  const cfg = api.readLibraryConfig(stored);
+  assert.equal(cfg.baseUrl, 'http://127.0.0.1:8000');
+  assert.equal(cfg.username, 'tester');
+  assert.equal(cfg.accountId, 7);
+  assert.equal(cfg.password, '');
+  for (const storage of [null, { getItem() { throw new Error('blocked'); } }, { getItem: () => 'junk' }]) {
+    const fallback = api.readLibraryConfig(storage);
+    assert.equal(fallback.baseUrl, '');
+    assert.equal(fallback.accountId, 0);
+  }
+  assert.equal(api.readLibraryConfig({ getItem: key => key === 'xhs-enhanced:library-base-url' ? 'ftp://bad' : null }).baseUrl, '');
+  assert.equal(api.readLibraryConfig({ getItem: key => key === 'xhs-enhanced:library-account-id' ? '-3' : null }).accountId, 0);
+});

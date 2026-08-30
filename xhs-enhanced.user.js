@@ -1,11 +1,15 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.3.8
-// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；用户主页每个笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面
+// @version      1.4.0
+// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面；一键把笔记链接发送到自建 XHS_ALL_IN_ONE 内容库保存
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
+// @match        https://www.xiaohongshu.com/explore/*
+// @match        https://www.xiaohongshu.com/discovery/item/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      xhscdn.com
 // @connect      *.xhscdn.com
 // @connect      sns-webpic-qc.xhscdn.com
@@ -63,6 +67,40 @@
   const SHARE_BASE = 'https://www.xiaohongshu.com/';
   const XSEC_TOKEN_QUERY = 'xsec_token';
   const XSEC_SOURCE_VALUE = 'pc_feed';
+  const LIBRARY_BASE_URL_KEY = 'xhs-enhanced:library-base-url';
+  const LIBRARY_USERNAME_KEY = 'xhs-enhanced:library-username';
+  const LIBRARY_ACCOUNT_ID_KEY = 'xhs-enhanced:library-account-id';
+  const LIBRARY_PASSWORD_KEY = 'xhs-enhanced:library-password';
+  const LIBRARY_REFRESH_KEY = 'xhs-enhanced:library-refresh-token';
+  const LIBRARY_CRAWL_PATH = '/api/xhs/crawl/note-urls';
+  const LIBRARY_BATCH_LIMIT = 50;
+  const DETAIL_ROUTE_PATTERN = /^\/(?:explore|discovery\/item)\/[A-Za-z0-9]+$/;
+  const SAVE_LIBRARY_CLASS = 'xhs-enhanced-save-library';
+  const SAVE_LIBRARY_TEXT = '保存入库';
+  const SAVE_LIBRARY_DONE_TEXT = '已入库';
+  const LIBRARY_PAGE_BUTTON_ID = 'xhs-enhanced-library-page';
+  const LIBRARY_PAGE_BUTTON_TEXT = '保存到内容库';
+  const LIBRARY_BATCH_BUTTON_ID = 'xhs-enhanced-library-batch';
+  const LIBRARY_BATCH_BUTTON_TEXT = '本页全部入库';
+  const LIBRARY_BATCH_EMPTY_TEXT = '本页没有可入库的笔记链接';
+  const LIBRARY_TOGGLE_ID = 'xhs-enhanced-library-toggle';
+  const LIBRARY_TOGGLE_TEXT = '内容库设置';
+  const LIBRARY_PANEL_ID = 'xhs-enhanced-library-panel';
+  const LIBRARY_STATUS_ID = 'xhs-enhanced-library-status';
+  const LIBRARY_BASE_INPUT_ID = 'xhs-enhanced-library-base-input';
+  const LIBRARY_USER_INPUT_ID = 'xhs-enhanced-library-user-input';
+  const LIBRARY_PASSWORD_INPUT_ID = 'xhs-enhanced-library-password-input';
+  const LIBRARY_ACCOUNT_SELECT_ID = 'xhs-enhanced-library-account-select';
+  const LIBRARY_SAVE_SETTINGS_TEXT = '保存设置';
+  const LIBRARY_TEST_TEXT = '测试连接';
+  const LIBRARY_SAVED_OK = '已保存到内容库';
+  const LIBRARY_SAVE_FAIL = '内容库保存失败';
+  const LIBRARY_NO_TOKEN = '未获取到 xsec_token，无法采集';
+  const LIBRARY_NO_CONFIG = '请先配置内容库（右下角“内容库设置”）';
+  const LIBRARY_NO_ACCOUNT = '内容库未发现可用的小红书 PC 端账号';
+  const LIBRARY_AUTH_FAIL = '内容库登录失败，请检查用户名与密码';
+  const LIBRARY_CONNECT_FAIL = '无法连接内容库服务';
+  const LIBRARY_GM_MISSING = '需油猴授权（GM_xmlhttpRequest）';
   const NOTE_ID_PATTERN = /\/(?:explore|discovery\/item)\/([A-Za-z0-9]+)/;
   // Real __INITIAL_STATE__ uses camelCase xsecToken; noteCard often has noteId next to xsecToken.
   const NOTE_ID_THEN_TOKEN_PATTERN = /"noteId"\s*:\s*"([0-9a-fA-F]+)"\s*,\s*"xsecToken"\s*:\s*"([^"]+)"/g;
@@ -101,6 +139,13 @@
   const coverBlobCache = new Map();
   const COVER_CACHE_LIMIT = 80;
   let copyCoverInFlight = false;
+  let saveInFlight = false;
+  let libraryToggle = null;
+  let libraryPanel = null;
+  let libraryPanelOpen = false;
+  let libraryPageButton = null;
+  let libraryBatchButton = null;
+  const libraryTokenMemory = { accessToken: '', refreshToken: '', exp: 0 };
   let fallbackTokenMap = null;
   let fallbackTokenChecked = false;
   let originalPushState = null;
@@ -156,6 +201,84 @@
     return { ok: true, value: threshold, persisted };
   }
 
+  function getSecretStorage() {
+    // GM_*Value storage lives outside the page-reachable localStorage, so secrets
+    // (content-library password / refresh token) must not fall back to the page
+    // while a script-manager store exists.
+    try {
+      if (typeof GM_getValue === 'function' && typeof GM_setValue === 'function') {
+        return { get: key => GM_getValue(key, ''), set: (key, value) => GM_setValue(key, String(value)) };
+      }
+    } catch (_) {}
+    try {
+      if (ROOT.GM_getValue && ROOT.GM_setValue) {
+        return { get: key => ROOT.GM_getValue(key, ''), set: (key, value) => ROOT.GM_setValue(key, String(value)) };
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function readSecret(key) {
+    const secretStorage = getSecretStorage();
+    if (secretStorage) {
+      try { return String(secretStorage.get(key) || ''); } catch (_) { return ''; }
+    }
+    const storage = getStorage();
+    if (!storage) return '';
+    try { return String(storage.getItem(key) || ''); } catch (_) { return ''; }
+  }
+
+  function writeSecret(key, value) {
+    const text = String(value == null ? '' : value);
+    const secretStorage = getSecretStorage();
+    if (secretStorage) {
+      try { secretStorage.set(key, text); return true; } catch (_) {}
+    }
+    const storage = getStorage();
+    if (!storage) return false;
+    try { storage.setItem(key, text); return true; } catch (_) { return false; }
+  }
+
+  function parseBaseUrl(value) {
+    const text = normalizeSpace(value).replace(/\/+$/, '');
+    if (!text || !/^https?:\/\/\S+$/i.test(text)) return { ok: false, value: '' };
+    return { ok: true, value: text };
+  }
+
+  function readLibraryConfig(storage = getStorage()) {
+    let baseUrl = '';
+    let username = '';
+    let accountId = 0;
+    try { baseUrl = String((storage && storage.getItem(LIBRARY_BASE_URL_KEY)) || ''); } catch (_) {}
+    try { username = String((storage && storage.getItem(LIBRARY_USERNAME_KEY)) || '').trim(); } catch (_) {}
+    try { accountId = Number((storage && storage.getItem(LIBRARY_ACCOUNT_ID_KEY)) || 0) || 0; } catch (_) {}
+    const parsedBase = parseBaseUrl(baseUrl);
+    return {
+      baseUrl: parsedBase.ok ? parsedBase.value : '',
+      username,
+      accountId: Number.isSafeInteger(accountId) && accountId > 0 ? accountId : 0,
+      password: readSecret(LIBRARY_PASSWORD_KEY)
+    };
+  }
+
+  function parseTokenExp(token) {
+    const parts = String(token || '').split('.');
+    if (parts.length !== 3 || !parts[1] || typeof ROOT.atob !== 'function') return 0;
+    try {
+      let payload = String(parts[1]).replace(/-/g, '+').replace(/_/g, '/');
+      while (payload.length % 4 !== 0) payload += '=';
+      const match = ROOT.atob(payload).match(/"exp"\s*:\s*(\d+)/);
+      return match ? Number(match[1]) || 0 : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  function buildCrawlPayload(accountId, urls) {
+    const list = (Array.isArray(urls) ? urls : []).filter(url => typeof url === 'string' && url);
+    return { account_id: Number(accountId) || 0, urls: list, save_to_library: true, fetch_comments: false };
+  }
+
   function parseLikeCount(input) {
     const original = normalizeSpace(input);
     if (!original) return { ok: false, reason: 'empty' };
@@ -180,6 +303,11 @@
   function isProfileRoute(pathname) {
     const path = String(pathname || '').split('?')[0];
     return path.startsWith('/user/profile/');
+  }
+
+  function isDetailRoute(pathname) {
+    const path = String(pathname || '').split('?')[0];
+    return DETAIL_ROUTE_PATTERN.test(path);
   }
 
   function getNoteIdFromHref(href) {
@@ -812,6 +940,152 @@
     });
   }
 
+  // Generic GM channel for the content-library API: page fetch is blocked by the
+  // deployed backend's CORS allow-list (localhost dev origins only).
+  function gmJsonRequest(options) {
+    return new Promise(resolve => {
+      const req = getGmRequest();
+      if (!req) { resolve({ ok: false, status: 0, json: null, error: 'gm-unavailable' }); return; }
+      let data;
+      const headers = Object.assign({ Accept: 'application/json' }, options.headers || {});
+      if (options.data !== undefined) {
+        data = JSON.stringify(options.data);
+        headers['Content-Type'] = 'application/json';
+      }
+      try {
+        req({
+          method: options.method || 'GET',
+          url: options.url,
+          headers,
+          data,
+          timeout: options.timeout || 20000,
+          onload(res) {
+            let json = null;
+            try { json = res && res.responseText ? JSON.parse(res.responseText) : null; } catch (_) {}
+            const status = res ? Number(res.status) || 0 : 0;
+            let error = '';
+            if (!json) {
+              error = res && res.responseText ? normalizeSpace(res.responseText).slice(0, 200) : '';
+            } else if (json.detail) {
+              error = typeof json.detail === 'string' ? json.detail : normalizeSpace(JSON.stringify(json.detail));
+            }
+            resolve({ ok: status >= 200 && status < 300, status, json, error });
+          },
+          onerror() { resolve({ ok: false, status: 0, json: null, error: 'network' }); },
+          ontimeout() { resolve({ ok: false, status: 0, json: null, error: 'timeout' }); }
+        });
+      } catch (_) {
+        resolve({ ok: false, status: 0, json: null, error: 'gm-error' });
+      }
+    });
+  }
+
+  function storeLibraryAccessToken(token) {
+    libraryTokenMemory.accessToken = String(token || '');
+    libraryTokenMemory.exp = parseTokenExp(libraryTokenMemory.accessToken);
+  }
+
+  function clearLibraryTokens() {
+    libraryTokenMemory.accessToken = '';
+    libraryTokenMemory.refreshToken = '';
+    libraryTokenMemory.exp = 0;
+    writeSecret(LIBRARY_REFRESH_KEY, '');
+  }
+
+  function libraryLogin(cfg) {
+    return gmJsonRequest({
+      method: 'POST',
+      url: cfg.baseUrl + '/api/auth/login',
+      data: { username: cfg.username, password: cfg.password }
+    }).then(res => {
+      if (!res.ok || !res.json || !res.json.access_token) return false;
+      storeLibraryAccessToken(res.json.access_token);
+      if (res.json.refresh_token) {
+        libraryTokenMemory.refreshToken = String(res.json.refresh_token);
+        writeSecret(LIBRARY_REFRESH_KEY, libraryTokenMemory.refreshToken);
+      }
+      return true;
+    });
+  }
+
+  function libraryRefresh(cfg) {
+    const refresh = libraryTokenMemory.refreshToken || readSecret(LIBRARY_REFRESH_KEY);
+    if (!refresh) return Promise.resolve(false);
+    return gmJsonRequest({
+      method: 'POST',
+      url: cfg.baseUrl + '/api/auth/refresh',
+      data: { refresh_token: refresh }
+    }).then(res => {
+      if (!res.ok || !res.json || !res.json.access_token) return false;
+      storeLibraryAccessToken(res.json.access_token);
+      return true;
+    });
+  }
+
+  function ensureLibraryToken(forceRenew) {
+    const cfg = readLibraryConfig();
+    if (!cfg.baseUrl || !cfg.username || !cfg.password) return Promise.resolve({ ok: false, error: 'config-missing' });
+    const now = Math.floor(Date.now() / 1000);
+    if (!forceRenew && libraryTokenMemory.accessToken && libraryTokenMemory.exp - 30 > now) {
+      return Promise.resolve({ ok: true, token: libraryTokenMemory.accessToken });
+    }
+    return libraryRefresh(cfg)
+      .then(refreshed => (refreshed ? true : libraryLogin(cfg)))
+      .then(logged => (logged
+        ? { ok: true, token: libraryTokenMemory.accessToken }
+        : { ok: false, error: 'auth-failed' }));
+  }
+
+  function checkLibraryHealth(baseUrl) {
+    return gmJsonRequest({ method: 'GET', url: baseUrl + '/api/health', timeout: 8000 });
+  }
+
+  function fetchLibraryPcAccounts(token, baseUrl) {
+    return gmJsonRequest({
+      method: 'GET',
+      url: baseUrl + '/api/accounts?platform=xhs&page_size=100',
+      headers: { Authorization: 'Bearer ' + token }
+    }).then(res => {
+      if (!res.ok || !res.json || !Array.isArray(res.json.items)) {
+        return { ok: false, accounts: [], error: res.error || 'bad-response' };
+      }
+      const accounts = [];
+      for (const item of res.json.items) {
+        if (item && item.platform === 'xhs' && item.sub_type === 'pc' && Number(item.id) > 0) {
+          accounts.push({ id: Number(item.id), nickname: String(item.nickname || ''), status: String(item.status || '') });
+        }
+      }
+      return { ok: true, accounts, error: '' };
+    });
+  }
+
+  function postCrawlNoteUrls(token, cfg, urls) {
+    return gmJsonRequest({
+      method: 'POST',
+      url: cfg.baseUrl + LIBRARY_CRAWL_PATH,
+      headers: { Authorization: 'Bearer ' + token },
+      data: buildCrawlPayload(cfg.accountId, urls)
+    });
+  }
+
+  function saveNoteUrlsToLibrary(urls) {
+    const cfg = readLibraryConfig();
+    if (!cfg.baseUrl || !cfg.username || !cfg.password) {
+      return Promise.resolve({ ok: false, status: 0, json: null, error: 'config-missing' });
+    }
+    if (!cfg.accountId) return Promise.resolve({ ok: false, status: 0, json: null, error: 'account-missing' });
+    return ensureLibraryToken().then(auth => {
+      if (!auth.ok) return { ok: false, status: 0, json: null, error: auth.error };
+      return postCrawlNoteUrls(auth.token, cfg, urls).then(res => {
+        if (res.status !== 401) return res;
+        return ensureLibraryToken(true).then(renewed => {
+          if (!renewed.ok) return { ok: false, status: 0, json: null, error: renewed.error };
+          return postCrawlNoteUrls(renewed.token, cfg, urls);
+        });
+      });
+    });
+  }
+
   function gmFetchCoverBlob(url) {
     if (!url || /^(?:data:|blob:)/i.test(url) || !getGmRequest() || isCoverMiss(url)) return Promise.resolve(null);
     const cached = getCachedCoverBlob(url);
@@ -877,9 +1151,134 @@
     });
   }
 
+  function resolveSaveUrlFromCard(card) {
+    const link = extractNoteLink(card);
+    if (!link) return { ok: false, url: '', reason: 'no-link' };
+    if (!getXsecTokenFromHref(link)) return { ok: false, url: '', reason: 'no-token' };
+    return { ok: true, url: link, reason: '' };
+  }
+
+  function buildDetailNoteUrl() {
+    try {
+      const loc = ROOT.location;
+      if (!loc || !loc.origin || loc.origin === 'null') return '';
+      return loc.origin + loc.pathname + (loc.search || '');
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function onSaveToLibrary(card, button) {
+    if (saveInFlight) return;
+    const resolved = resolveSaveUrlFromCard(card);
+    if (!resolved.ok) {
+      showCopyStatus(resolved.reason === 'no-token' ? LIBRARY_NO_TOKEN : COPY_LINK_FAIL);
+      return;
+    }
+    submitNoteUrlsToLibrary([resolved.url]).then(result => {
+      if (!result.ok || !button || !button.isConnected) return;
+      button.textContent = SAVE_LIBRARY_DONE_TEXT;
+      button.disabled = true;
+      ROOT.setTimeout(() => {
+        button.textContent = SAVE_LIBRARY_TEXT;
+        button.disabled = false;
+      }, 2000);
+    });
+  }
+
+  function onSaveCurrentDetail() {
+    if (saveInFlight) return;
+    const url = buildDetailNoteUrl();
+    if (!url || !getXsecTokenFromHref(url)) { showCopyStatus(LIBRARY_NO_TOKEN); return; }
+    submitNoteUrlsToLibrary([url]);
+  }
+
+  function submitNoteUrlsToLibrary(urls, options) {
+    const silent = Boolean(options && options.silent);
+    if (saveInFlight) return Promise.resolve({ ok: false, saved: 0, failed: 0 });
+    const cfg = readLibraryConfig();
+    if (!cfg.baseUrl || !cfg.username || !cfg.password) {
+      if (!silent) { showCopyStatus(LIBRARY_NO_CONFIG); openLibraryPanel(); }
+      return Promise.resolve({ ok: false, saved: 0, failed: 0 });
+    }
+    if (!cfg.accountId) {
+      if (!silent) { showCopyStatus(LIBRARY_NO_ACCOUNT); openLibraryPanel(); }
+      return Promise.resolve({ ok: false, saved: 0, failed: 0 });
+    }
+    if (!getGmRequest()) {
+      if (!silent) showCopyStatus(LIBRARY_GM_MISSING);
+      return Promise.resolve({ ok: false, saved: 0, failed: 0 });
+    }
+    saveInFlight = true;
+    if (!silent) showCopyStatus('正在保存到内容库…');
+    const finish = result => {
+      saveInFlight = false;
+      const errors = result.json && Array.isArray(result.json.errors) ? result.json.errors : [];
+      const saved = result.json ? Number(result.json.saved_count) || 0 : 0;
+      const failed = errors.length;
+      if (result.ok) {
+        if (failed > 0) {
+          if (!silent) {
+            const message = errors[0] && errors[0].error ? normalizeSpace(String(errors[0].error)) : '';
+            showCopyStatus('采集失败：' + (message || '服务端采集失败'));
+          }
+        } else if (!silent) {
+          showCopyStatus(saved > 0 ? LIBRARY_SAVED_OK : LIBRARY_SAVE_FAIL);
+        }
+        return { ok: saved > 0 && failed === 0, saved, failed };
+      }
+      if (!silent) {
+        if (result.error === 'config-missing') { showCopyStatus(LIBRARY_NO_CONFIG); openLibraryPanel(); }
+        else if (result.error === 'account-missing') { showCopyStatus(LIBRARY_NO_ACCOUNT); openLibraryPanel(); }
+        else if (result.error === 'auth-failed') showCopyStatus(LIBRARY_AUTH_FAIL);
+        else if (result.error === 'gm-unavailable') showCopyStatus(LIBRARY_GM_MISSING);
+        else if (result.error) showCopyStatus('保存失败：' + normalizeSpace(result.error));
+        else showCopyStatus(LIBRARY_CONNECT_FAIL);
+      }
+      return { ok: false, saved, failed };
+    };
+    return saveNoteUrlsToLibrary(urls).then(finish);
+  }
+
+  function onSaveAllVisible() {
+    if (saveInFlight) return;
+    const seen = new Set();
+    const urls = [];
+    for (const card of discoverCards(ROOT.document)) {
+      const resolved = resolveSaveUrlFromCard(card);
+      if (resolved.ok && !seen.has(resolved.url)) {
+        seen.add(resolved.url);
+        urls.push(resolved.url);
+      }
+    }
+    if (!urls.length) { showCopyStatus(LIBRARY_BATCH_EMPTY_TEXT); return; }
+    const batches = [];
+    for (let i = 0; i < urls.length; i += LIBRARY_BATCH_LIMIT) batches.push(urls.slice(i, i + LIBRARY_BATCH_LIMIT));
+    let index = 0;
+    const totals = { saved: 0, failed: 0 };
+    if (libraryBatchButton) libraryBatchButton.disabled = true;
+    const next = () => {
+      if (libraryBatchButton) libraryBatchButton.disabled = index < batches.length;
+      if (index >= batches.length) {
+        showCopyStatus('本页入库完成：成功 ' + totals.saved + ' 条' + (totals.failed > 0 ? '，失败 ' + totals.failed + ' 条' : ''));
+        return;
+      }
+      const batch = batches[index];
+      index += 1;
+      showCopyStatus('正在入库 ' + index + '/' + batches.length + ' 批…');
+      submitNoteUrlsToLibrary(batch, { silent: true }).then(result => {
+        totals.saved += result.saved;
+        totals.failed += result.failed;
+        if (!result.ok && result.saved === 0 && result.failed === 0) totals.failed += batch.length;
+        next();
+      });
+    };
+    next();
+  }
+
   function ensureCardActions(card) {
     if (!card || !card.querySelector || !card.isConnected) return;
-    if (!isProfileRoute(getCurrentRoute())) {
+    if (!isTargetRoute(getCurrentRoute())) {
       removeCardActions(card);
       return;
     }
@@ -899,7 +1298,13 @@
       coverButton.textContent = COPY_COVER_TEXT;
       coverButton.setAttribute('aria-label', COPY_COVER_TEXT);
       coverButton.addEventListener('click', () => onCopyCover(card));
-      container.append(linkButton, coverButton);
+      const saveButton = ROOT.document.createElement('button');
+      saveButton.type = 'button';
+      saveButton.className = SAVE_LIBRARY_CLASS;
+      saveButton.textContent = SAVE_LIBRARY_TEXT;
+      saveButton.setAttribute('aria-label', SAVE_LIBRARY_TEXT);
+      saveButton.addEventListener('click', () => onSaveToLibrary(card, saveButton));
+      container.append(linkButton, coverButton, saveButton);
       card.appendChild(container);
     }
     card.setAttribute(CARD_ACTIONS_ATTRIBUTE, getCurrentRoute());
@@ -999,6 +1404,21 @@
       #${THRESHOLD_STATUS_ID}{position:fixed;top:190px;right:24px;z-index:2147483646;max-width:260px;padding:7px 10px;border-radius:6px;background:rgba(30,30,30,.92);color:#fff;font:13px/1.4 system-ui,sans-serif;pointer-events:none}
       #${JUMP_STATUS_ID}{position:fixed;top:228px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
       #${COPY_STATUS_ID}{position:fixed;top:276px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
+      #${LIBRARY_PAGE_BUTTON_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
+      #${LIBRARY_PAGE_BUTTON_ID}:hover{background:#e61e3c}#${LIBRARY_PAGE_BUTTON_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
+      #${LIBRARY_BATCH_BUTTON_ID}{position:fixed;top:316px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 13px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
+      #${LIBRARY_BATCH_BUTTON_ID}:hover{background:#e61e3c}#${LIBRARY_BATCH_BUTTON_ID}:disabled{opacity:.6;cursor:default}
+      #${LIBRARY_TOGGLE_ID}{position:fixed;bottom:24px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:rgba(30,30,30,.9);color:#fff;font:600 13px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
+      #${LIBRARY_TOGGLE_ID}:hover{background:rgba(15,15,15,1)}
+      #${LIBRARY_PANEL_ID}{position:fixed;top:88px;right:24px;z-index:2147483647;width:300px;display:none;padding:12px 14px;background:#fff;border:1px solid #ddd;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.22);font:13px/1.5 system-ui,sans-serif;text-align:left}
+      #${LIBRARY_PANEL_ID}.xhs-enhanced-library-panel--open{display:block}
+      #${LIBRARY_PANEL_ID} label{display:block;margin:8px 0 3px;color:#555;font-size:12px}
+      #${LIBRARY_PANEL_ID} input,#${LIBRARY_PANEL_ID} select{width:100%;box-sizing:border-box;border:1px solid #bbb;border-radius:5px;padding:6px 7px;font:13px/1.4 system-ui,sans-serif}
+      .xhs-enhanced-library-panel-title{font-weight:700;font-size:14px;color:#222}
+      .xhs-enhanced-library-panel-actions{display:flex;gap:8px;margin-top:10px}
+      .xhs-enhanced-library-panel-actions button{flex:1;border:0;border-radius:6px;padding:7px 0;background:#ff2442;color:#fff;font:600 13px/1 system-ui,sans-serif;cursor:pointer}
+      .xhs-enhanced-library-panel-actions button:hover{background:#e61e3c}
+      #${LIBRARY_STATUS_ID}{margin-top:8px;color:#333;font-size:12px;word-break:break-all}
       .${CARD_ACTIONS_CLASS}{position:absolute;top:6px;left:6px;z-index:2147483640;display:flex;gap:4px;opacity:0;transition:opacity .15s ease;pointer-events:none}
       .xhs-enhanced-card--popular .${CARD_ACTIONS_CLASS},.note-item:hover .${CARD_ACTIONS_CLASS},section.note-item:hover .${CARD_ACTIONS_CLASS},article.note-item:hover .${CARD_ACTIONS_CLASS}{opacity:1;pointer-events:auto}
       [data-note-card],article.note-item,section.note-item,.note-item{position:relative}
@@ -1190,6 +1610,281 @@
     jumpButton = null;
   }
 
+  function libraryAccountOptionLabel(account) {
+    const nickname = normalizeSpace(account.nickname);
+    const status = account.status && account.status !== 'ok' ? '（' + account.status + '）' : '';
+    return '#' + account.id + (nickname ? ' ' + nickname : '') + status;
+  }
+
+  function persistLibraryAccountFromSelect(select) {
+    const value = Number(select && select.value) || 0;
+    if (!value) return;
+    const storage = getStorage();
+    if (!storage) return;
+    try { storage.setItem(LIBRARY_ACCOUNT_ID_KEY, String(value)); } catch (_) {}
+  }
+
+  function populateLibraryAccountSelect(accounts) {
+    if (!libraryPanel) return;
+    const select = libraryPanel.querySelector('#' + LIBRARY_ACCOUNT_SELECT_ID);
+    if (!select) return;
+    select.textContent = '';
+    for (const account of accounts) {
+      const option = ROOT.document.createElement('option');
+      option.value = String(account.id);
+      option.textContent = libraryAccountOptionLabel(account);
+      select.appendChild(option);
+    }
+    if (!accounts.length) {
+      const option = ROOT.document.createElement('option');
+      option.value = '';
+      option.textContent = '未发现 PC 端账号，请先在平台绑定';
+      select.appendChild(option);
+    }
+    const current = String(readLibraryConfig().accountId || '');
+    const values = Array.from(select.options).map(option => option.value);
+    if (current && values.indexOf(current) >= 0) select.value = current;
+    else if (accounts.length === 1) select.value = String(accounts[0].id);
+    persistLibraryAccountFromSelect(select);
+  }
+
+  function showLibraryStatus(message) {
+    if (!libraryPanel || !libraryPanel.isConnected) return;
+    const status = libraryPanel.querySelector('#' + LIBRARY_STATUS_ID);
+    if (status) status.textContent = message;
+  }
+
+  function fillLibraryPanelInputs(panel) {
+    const cfg = readLibraryConfig();
+    const base = panel.querySelector('#' + LIBRARY_BASE_INPUT_ID);
+    const user = panel.querySelector('#' + LIBRARY_USER_INPUT_ID);
+    const password = panel.querySelector('#' + LIBRARY_PASSWORD_INPUT_ID);
+    if (base) base.value = cfg.baseUrl;
+    if (user) user.value = cfg.username;
+    if (password) password.value = cfg.password;
+  }
+
+  function ensureLibraryPanel() {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let panel = libraryPanel && libraryPanel.isConnected ? libraryPanel : ROOT.document.getElementById(LIBRARY_PANEL_ID);
+    if (!panel) {
+      panel = ROOT.document.createElement('div');
+      panel.id = LIBRARY_PANEL_ID;
+      const title = ROOT.document.createElement('div');
+      title.className = 'xhs-enhanced-library-panel-title';
+      title.textContent = LIBRARY_TOGGLE_TEXT;
+      panel.appendChild(title);
+      const fields = [
+        [LIBRARY_BASE_INPUT_ID, '服务器地址', 'text', 'http://192.168.1.10:8000'],
+        [LIBRARY_USER_INPUT_ID, '用户名', 'text', ''],
+        [LIBRARY_PASSWORD_INPUT_ID, '密码', 'password', '']
+      ];
+      for (const field of fields) {
+        const [id, label, type, placeholder] = field;
+        const labelNode = ROOT.document.createElement('label');
+        labelNode.htmlFor = id;
+        labelNode.textContent = label;
+        const input = ROOT.document.createElement('input');
+        input.id = id;
+        input.type = type;
+        input.placeholder = placeholder;
+        input.autocomplete = 'off';
+        input.setAttribute('aria-label', label);
+        panel.append(labelNode, input);
+      }
+      const accountLabel = ROOT.document.createElement('label');
+      accountLabel.htmlFor = LIBRARY_ACCOUNT_SELECT_ID;
+      accountLabel.textContent = '小红书账号（PC 端）';
+      const select = ROOT.document.createElement('select');
+      select.id = LIBRARY_ACCOUNT_SELECT_ID;
+      select.setAttribute('aria-label', '小红书账号');
+      const emptyOption = ROOT.document.createElement('option');
+      emptyOption.value = '';
+      emptyOption.textContent = '点击“测试连接”自动获取';
+      select.appendChild(emptyOption);
+      select.addEventListener('change', () => persistLibraryAccountFromSelect(select));
+      const actions = ROOT.document.createElement('div');
+      actions.className = 'xhs-enhanced-library-panel-actions';
+      const saveButton = ROOT.document.createElement('button');
+      saveButton.type = 'button';
+      saveButton.textContent = LIBRARY_SAVE_SETTINGS_TEXT;
+      saveButton.addEventListener('click', applyLibrarySettings);
+      const testButton = ROOT.document.createElement('button');
+      testButton.type = 'button';
+      testButton.textContent = LIBRARY_TEST_TEXT;
+      testButton.addEventListener('click', testLibraryConnection);
+      actions.append(saveButton, testButton);
+      const status = ROOT.document.createElement('div');
+      status.id = LIBRARY_STATUS_ID;
+      status.setAttribute('role', 'status');
+      status.setAttribute('aria-live', 'polite');
+      panel.append(accountLabel, select, actions, status);
+      ROOT.document.body.appendChild(panel);
+    }
+    libraryPanel = panel;
+    fillLibraryPanelInputs(panel);
+  }
+
+  function openLibraryPanel() {
+    ensureLibraryPanel();
+    libraryPanelOpen = true;
+    if (libraryPanel) libraryPanel.classList.add('xhs-enhanced-library-panel--open');
+  }
+
+  function closeLibraryPanel() {
+    libraryPanelOpen = false;
+    if (libraryPanel) libraryPanel.classList.remove('xhs-enhanced-library-panel--open');
+  }
+
+  function toggleLibraryPanel() {
+    if (libraryPanelOpen) closeLibraryPanel();
+    else openLibraryPanel();
+  }
+
+  function applyLibrarySettings() {
+    if (!libraryPanel || !libraryPanel.isConnected) return;
+    const base = libraryPanel.querySelector('#' + LIBRARY_BASE_INPUT_ID);
+    const user = libraryPanel.querySelector('#' + LIBRARY_USER_INPUT_ID);
+    const password = libraryPanel.querySelector('#' + LIBRARY_PASSWORD_INPUT_ID);
+    const select = libraryPanel.querySelector('#' + LIBRARY_ACCOUNT_SELECT_ID);
+    const parsed = parseBaseUrl(base ? base.value : '');
+    if (!parsed.ok) {
+      showLibraryStatus('服务器地址需以 http:// 或 https:// 开头');
+      return;
+    }
+    const storage = getStorage();
+    let persisted = false;
+    if (storage) {
+      try {
+        storage.setItem(LIBRARY_BASE_URL_KEY, parsed.value);
+        storage.setItem(LIBRARY_USERNAME_KEY, normalizeSpace(user ? user.value : ''));
+        if (select && select.value) storage.setItem(LIBRARY_ACCOUNT_ID_KEY, select.value);
+        persisted = true;
+      } catch (_) {
+        persisted = false;
+      }
+    }
+    writeSecret(LIBRARY_PASSWORD_KEY, password ? password.value : '');
+    clearLibraryTokens();
+    showLibraryStatus(persisted ? '设置已保存' : '设置已应用，但未能持久化');
+  }
+
+  function testLibraryConnection() {
+    if (!libraryPanel || !libraryPanel.isConnected) return;
+    applyLibrarySettings();
+    const cfg = readLibraryConfig();
+    if (!cfg.baseUrl) { showLibraryStatus('请先填写服务器地址'); return; }
+    if (!cfg.username || !cfg.password) { showLibraryStatus('请先填写用户名与密码'); return; }
+    if (!getGmRequest()) { showLibraryStatus(LIBRARY_GM_MISSING); return; }
+    showLibraryStatus('正在连接内容库…');
+    checkLibraryHealth(cfg.baseUrl).then(health => {
+      if (!health.ok) { showLibraryStatus(LIBRARY_CONNECT_FAIL); return; }
+      ensureLibraryToken(true).then(auth => {
+        if (!auth.ok) { showLibraryStatus(LIBRARY_AUTH_FAIL); return; }
+        fetchLibraryPcAccounts(auth.token, cfg.baseUrl).then(result => {
+          if (!result.ok) { showLibraryStatus('登录成功，但获取账号列表失败'); return; }
+          if (!result.accounts.length) { showLibraryStatus(LIBRARY_NO_ACCOUNT); return; }
+          populateLibraryAccountSelect(result.accounts);
+          const selected = readLibraryConfig().accountId;
+          const picked = result.accounts.find(account => account.id === selected) || result.accounts[0];
+          if (selected) showLibraryStatus('连接成功，当前账号：' + libraryAccountOptionLabel(picked));
+          else showLibraryStatus('连接成功，发现 ' + result.accounts.length + ' 个账号，请选择后点击保存设置');
+        });
+      });
+    });
+  }
+
+  function ensureLibraryToggle() {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let button = libraryToggle && libraryToggle.isConnected ? libraryToggle : ROOT.document.getElementById(LIBRARY_TOGGLE_ID);
+    if (!button) {
+      button = ROOT.document.createElement('button');
+      button.id = LIBRARY_TOGGLE_ID;
+      button.type = 'button';
+      button.textContent = LIBRARY_TOGGLE_TEXT;
+      button.setAttribute('aria-label', LIBRARY_TOGGLE_TEXT);
+      button.addEventListener('click', toggleLibraryPanel);
+      ROOT.document.body.appendChild(button);
+    }
+    libraryToggle = button;
+  }
+
+  function removeLibraryToggle() {
+    const button = libraryToggle && libraryToggle.isConnected ? libraryToggle : ROOT.document && ROOT.document.getElementById(LIBRARY_TOGGLE_ID);
+    if (button) button.remove();
+    libraryToggle = null;
+  }
+
+  function ensureLibraryPageButton() {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let button = libraryPageButton && libraryPageButton.isConnected ? libraryPageButton : ROOT.document.getElementById(LIBRARY_PAGE_BUTTON_ID);
+    if (!button) {
+      button = ROOT.document.createElement('button');
+      button.id = LIBRARY_PAGE_BUTTON_ID;
+      button.type = 'button';
+      button.textContent = LIBRARY_PAGE_BUTTON_TEXT;
+      button.setAttribute('aria-label', LIBRARY_PAGE_BUTTON_TEXT);
+      button.addEventListener('click', onSaveCurrentDetail);
+      ROOT.document.body.appendChild(button);
+    }
+    libraryPageButton = button;
+  }
+
+  function removeLibraryPageButton() {
+    const button = libraryPageButton && libraryPageButton.isConnected ? libraryPageButton : ROOT.document && ROOT.document.getElementById(LIBRARY_PAGE_BUTTON_ID);
+    if (button) button.remove();
+    libraryPageButton = null;
+  }
+
+  function ensureLibraryBatchButton() {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let button = libraryBatchButton && libraryBatchButton.isConnected ? libraryBatchButton : ROOT.document.getElementById(LIBRARY_BATCH_BUTTON_ID);
+    if (!button) {
+      button = ROOT.document.createElement('button');
+      button.id = LIBRARY_BATCH_BUTTON_ID;
+      button.type = 'button';
+      button.textContent = LIBRARY_BATCH_BUTTON_TEXT;
+      button.setAttribute('aria-label', LIBRARY_BATCH_BUTTON_TEXT);
+      button.addEventListener('click', onSaveAllVisible);
+      ROOT.document.body.appendChild(button);
+    }
+    libraryBatchButton = button;
+  }
+
+  function removeLibraryBatchButton() {
+    const button = libraryBatchButton && libraryBatchButton.isConnected ? libraryBatchButton : ROOT.document && ROOT.document.getElementById(LIBRARY_BATCH_BUTTON_ID);
+    if (button) button.remove();
+    libraryBatchButton = null;
+  }
+
+  function removeLibraryUi() {
+    removeLibraryToggle();
+    removeLibraryPageButton();
+    removeLibraryBatchButton();
+    closeLibraryPanel();
+    const panel = libraryPanel && libraryPanel.isConnected ? libraryPanel : ROOT.document && ROOT.document.getElementById(LIBRARY_PANEL_ID);
+    if (panel) panel.remove();
+    libraryPanel = null;
+  }
+
+  function syncLibraryUi() {
+    if (!ROOT.document || !ROOT.document.body) return;
+    const route = getCurrentRoute();
+    if (isTargetRoute(route)) {
+      ensureLibraryToggle();
+      ensureLibraryBatchButton();
+      removeLibraryPageButton();
+      return;
+    }
+    if (isDetailRoute(route)) {
+      ensureLibraryToggle();
+      ensureLibraryPageButton();
+      removeLibraryBatchButton();
+      return;
+    }
+    removeLibraryUi();
+  }
+
   function syncJumpUi() {
     if (isTargetRoute(getCurrentRoute())) {
       ensureJumpUi();
@@ -1205,6 +1900,7 @@
     if (destroyed || !ROOT.document) return;
     counters.batches += 1;
     syncJumpUi();
+    syncLibraryUi();
     const url = ROOT.location ? ROOT.location.href : getCurrentRoute();
     if (url !== lastUrl) {
       lastUrl = url;
@@ -1353,6 +2049,7 @@
     lastUrl = '';
     scan(ROOT.document);
     syncJumpUi();
+    syncLibraryUi();
   }
 
   function destroy() {
@@ -1374,6 +2071,8 @@
     restoreHistorySignals();
     removeJumpUi();
     removeThresholdUi();
+    removeLibraryUi();
+    saveInFlight = false;
     clearCopyStatus();
     cleanupAll();
     const style = ROOT.document && ROOT.document.getElementById(STYLE_ID);
@@ -1381,9 +2080,10 @@
   }
 
   const pureApi = Object.freeze({
-    parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, isProfileRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
+    parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, isProfileRoute, isDetailRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
     getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue, extractTokensFromState, findTokenForNoteIdInState, getFallbackTokenForNoteId, clearFallbackTokenCache,
     toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, coverRequestHeaders, pickLargestFromSrcset,
+    parseBaseUrl, readLibraryConfig, parseTokenExp, buildCrawlPayload, buildDetailNoteUrl, resolveSaveUrlFromCard,
     READ_ATTRIBUTES, SELECTORS
   });
 

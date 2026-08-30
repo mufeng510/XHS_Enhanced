@@ -12,7 +12,10 @@ execFileSync(process.execPath, ['--check', 'scripts/browser-test-server.cjs'], {
 for (const line of [
   '@match        https://www.xiaohongshu.com/search_result*',
   '@match        https://www.xiaohongshu.com/user/profile/*',
+  '@match        https://www.xiaohongshu.com/explore/*',
+  '@match        https://www.xiaohongshu.com/discovery/item/*',
   '@grant        GM_xmlhttpRequest',
+  '@grant        GM_setValue',
   '@connect      *.xhscdn.com',
   '@connect      ci.xiaohongshu.com',
   '@run-at       document-idle'
@@ -25,7 +28,9 @@ assert(source.includes('toNoWatermarkCoverUrl'), 'no-watermark cover URL helper 
 assert(source.includes('loadCoverPngBlob'), 'cover blob loader required');
 assert(source.includes('new ROOT.Uint8Array'), 'binary-safe dataUrlToBlob encoding required');
 const matchCount = (source.match(/^\/\/ @match/gm) || []).length;
-assert.strictEqual(matchCount, 2, 'exactly two @match entries required');
+assert.strictEqual(matchCount, 4, 'exactly four @match entries required');
+assert(source.includes("'xhs-enhanced-library-page'"), 'library detail-page save button required');
+assert(source.includes('buildCrawlPayload'), 'content-library crawl payload builder required');
 assert(source.includes('attributeFilter: READ_ATTRIBUTES.slice()'), 'filtered attribute observer required');
 const additionalInfoCharacterCount = Array.from(additionalInfo).length;
 assert(
