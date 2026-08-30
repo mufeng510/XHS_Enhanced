@@ -12,7 +12,7 @@ execFileSync(process.execPath, ['--check', 'scripts/browser-test-server.cjs'], {
 for (const line of [
   '@match        https://www.xiaohongshu.com/search_result*',
   '@match        https://www.xiaohongshu.com/user/profile/*',
-  '@match        https://www.xiaohongshu.com/explore/*',
+  '@match        https://www.xiaohongshu.com/explore*',
   '@match        https://www.xiaohongshu.com/discovery/item/*',
   '@grant        GM_xmlhttpRequest',
   '@grant        GM_setValue',

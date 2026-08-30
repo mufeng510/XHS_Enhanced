@@ -57,7 +57,7 @@
 
 - `https://www.xiaohongshu.com/search_result*`
 - `https://www.xiaohongshu.com/user/profile/*`
-- `https://www.xiaohongshu.com/explore/*`
+- `https://www.xiaohongshu.com/explore*`（首页 feed 与笔记详情页）
 - `https://www.xiaohongshu.com/discovery/item/*`
 
 脚本声明 `@grant GM_xmlhttpRequest`（另申请 `GM_getValue`/`GM_setValue`/`GM_deleteValue` 用于在油猴脚本存储中保存内容库登录凭据），并 `@connect` 小红书图片 CDN 域名；封面读取仅访问 CDN，内容库保存仅访问你在设置里填写的自建服务器；不收集或上传页面数据到任何第三方。
