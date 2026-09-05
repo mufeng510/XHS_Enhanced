@@ -40,5 +40,8 @@ assert(
 for (const attribute of ['aria-label', 'title', 'data-like-count', 'data-xhs-like-count']) assert(source.includes(`'${attribute}'`));
 for (const forbiddenAttribute of ['datetime', 'data-publish-time', 'data-xhs-publish-time']) assert(!/READ_ATTRIBUTES[\s\S]{0,300}/.exec(source)?.[0].includes(`'${forbiddenAttribute}'`), `unused time attribute in observer filter: ${forbiddenAttribute}`);
 assert(!source.includes('xhs-enhanced-publish-time'), 'publication-time UI must not be generated');
-for (const required of ["'xhs-enhanced-jump-next'", "'xhs-enhanced-jump-status'", "setAttribute('role', 'status')", "setAttribute('aria-live', 'polite')"]) assert(source.includes(required), `missing jump UI contract: ${required}`);
+for (const required of ["'xhs-enhanced-jump-next'", "'xhs-enhanced-jump-prev'", "'xhs-enhanced-focus-toggle'", "'xhs-enhanced-card--dimmed'", "'xhs-enhanced-jump-status'", "setAttribute('role', 'status')", "setAttribute('aria-live', 'polite')"]) assert(source.includes(required), `missing jump UI contract: ${required}`);
+assert(source.includes("'xhs-enhanced:focus-popular'"), 'focus-mode persistence key required');
+assert(source.includes('selectPreviousPopularCard'), 'previous-popular-card selection required');
+assert(/filter:\s*blur\(/.test(source), 'focus-mode blur style required');
 console.log('Static checks passed.');

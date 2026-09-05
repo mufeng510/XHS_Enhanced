@@ -48,7 +48,11 @@
   }
   function card(name) { return sandbox.querySelector(`[data-case="${name}"]`); }
   function popular(node) { return node.classList.contains('xhs-enhanced-card--popular'); }
+  function dimmed(node) { return node.classList.contains('xhs-enhanced-card--dimmed'); }
   function jumpButton() { return document.getElementById('xhs-enhanced-jump-next'); }
+  function prevButton() { return document.getElementById('xhs-enhanced-jump-prev'); }
+  function jumpNav() { return document.getElementById('xhs-enhanced-jump-nav'); }
+  function focusToggleNode() { return document.getElementById('xhs-enhanced-focus-toggle'); }
   function statusNode() { return document.getElementById('xhs-enhanced-jump-status'); }
   function thresholdControl() { return document.getElementById('xhs-enhanced-threshold-control'); }
   function thresholdInput() { return document.getElementById('xhs-enhanced-threshold-input'); }
@@ -353,17 +357,71 @@
       jumpButton().click();
       assert(document.querySelectorAll('#xhs-enhanced-jump-status').length === 1, 'repeated last-note clicks reuse one status');
 
+      assert(prevButton() && prevButton().type === 'button' && prevButton().textContent === '上一条热门笔记', 'previous-note jump button is present and accessible on target route');
+      assert(jumpNav() && document.querySelectorAll('#xhs-enhanced-jump-nav').length === 1 && prevButton().parentElement === jumpNav() && jumpButton().parentElement === jumpNav(), 'both jump buttons share one nav row');
+      prevButton().click();
+      assert((calls.get(above) || []).length === 1 && calls.get(above)[0].behavior === 'smooth' && calls.get(above)[0].block === 'center', 'previous jump selects nearest popular card above viewport');
+      assert(!calls.has(visible) && !calls.has(partial), 'previous jump skips intersecting cards');
+
+      setRect(above, 100, 300); setRect(visible, -310, -10);
+      prevButton().click();
+      assert((calls.get(visible) || []).length === 1, 'second previous jump advances after geometry changes');
+
+      setRect(visible, 100, 300);
+      prevButton().click();
+      assert(scrollCalls.length === 3 && scrollCalls[2].behavior === 'smooth' && scrollCalls[2].top === 0, 'first popular note scrolls to document top');
+      assert(statusNode() && statusNode().textContent === '已经是第一条热门笔记', 'first-note status message is shown');
+      prevButton().click();
+      assert(document.querySelectorAll('#xhs-enhanced-jump-status').length === 1, 'repeated first-note clicks reuse one status');
+
       const dynamic = makeCard('jump-dynamic', 101); setRect(dynamic, viewport + 10); dynamic.scrollIntoView = options => calls.set(dynamic, [options]); sandbox.appendChild(dynamic);
       await checkpoint(); jumpButton().click();
       assert((calls.get(dynamic) || []).length === 1 && !statusNode(), 'dynamic popular card becomes next target and clears status');
 
       api.setTestRoute('/explore/abc'); await checkpoint();
-      assert(!jumpButton() && !statusNode(), 'leaving supported route removes jump UI');
+      assert(!jumpButton() && !prevButton() && !statusNode(), 'leaving supported route removes jump UI');
       api.setTestRoute('/user/profile/jump'); await checkpoint();
       assert(document.querySelectorAll('#xhs-enhanced-jump-next').length === 1, 'returning to supported route restores one jump button');
+      assert(document.querySelectorAll('#xhs-enhanced-jump-prev').length === 1 && document.querySelectorAll('#xhs-enhanced-jump-nav').length === 1, 'returning restores one previous button in one nav row');
     } finally {
       globalThis.scrollTo = originalScrollTo;
     }
+  }
+
+  async function focusMode() {
+    api.setTestRoute('/search_result');
+    localStorage.removeItem('xhs-enhanced:focus-popular');
+    const hot = makeCard('focus-hot', 101);
+    const cold = makeCard('focus-cold', 99);
+    sandbox.replaceChildren(hot, cold);
+    api.scan(); await checkpoint();
+    const toggleNode = focusToggleNode();
+    assert(toggleNode && toggleNode.type === 'button' && toggleNode.textContent === '只显示热门' && toggleNode.getAttribute('aria-label') === '只显示热门', 'focus toggle is present and labelled');
+    assert(toggleNode.getAttribute('aria-pressed') === 'false', 'focus mode is off by default');
+    assert(!dimmed(hot) && !dimmed(cold), 'no card is dimmed while focus mode is off');
+    assert(focusToggleNode().parentElement === jumpNav(), 'focus toggle lives in the jump nav row');
+
+    toggleNode.click(); await checkpoint();
+    assert(toggleNode.getAttribute('aria-pressed') === 'true' && localStorage.getItem('xhs-enhanced:focus-popular') === '1', 'focus toggle turns on and persists');
+    assert(popular(hot) && !dimmed(hot), 'popular card stays clear');
+    assert(dimmed(cold), 'non-popular card is blurred when focus mode is on');
+    assert(cold.isConnected && sandbox.contains(cold) && !cold.hasAttribute('hidden'), 'dimmed card stays in place as a placeholder');
+
+    api.setThreshold('50'); api.scan(); await checkpoint();
+    assert(!dimmed(cold) && popular(cold), 'lowering the threshold un-dims the formerly cold card');
+    api.setThreshold('100'); api.scan(); await checkpoint();
+    assert(dimmed(cold) && popular(hot) && !dimmed(hot), 'restoring the threshold re-dims without touching the popularity highlight');
+    assert(document.getElementById('xhs-enhanced-style').textContent.indexOf('blur(') >= 0, 'dimming blur style is installed');
+
+    api.setTestRoute('/explore/focus'); await checkpoint();
+    assert(!focusToggleNode() && !dimmed(cold) && !dimmed(hot), 'leaving target route cleans toggle and dimming');
+    api.setTestRoute('/search_result'); await checkpoint();
+    const restored = focusToggleNode();
+    assert(restored && restored.getAttribute('aria-pressed') === 'true' && dimmed(cold) && !dimmed(hot), 'focus state is restored from storage on return');
+
+    restored.click(); await checkpoint();
+    assert(restored.getAttribute('aria-pressed') === 'false' && !dimmed(cold) && localStorage.getItem('xhs-enhanced:focus-popular') === '0' && api.getFocusPopular() === false, 'focus toggle turns off, cleans dimming and persists the off state');
+    localStorage.removeItem('xhs-enhanced:focus-popular');
   }
 
   async function dynamicAndAttributes() {
@@ -443,7 +501,7 @@
     globalThis.requestAnimationFrame = callback => { queuedRafs.push(callback); return queuedRafs.length; };
     api.scan();
     api.destroy();
-    assert(!sandbox.querySelector('.xhs-enhanced-card--popular') && !document.getElementById('xhs-enhanced-style') && !jumpButton() && !statusNode(), 'destroy cleans owned state and jump UI');
+    assert(!sandbox.querySelector('.xhs-enhanced-card--popular') && !document.getElementById('xhs-enhanced-style') && !jumpButton() && !prevButton() && !focusToggleNode() && !statusNode(), 'destroy cleans owned state and jump UI');
     assert(history.pushState === thirdPartyPushState && history.replaceState === globalThis.__XHS_ORIGINAL_HISTORY__.replaceState, 'destroy preserves a third-party History wrapper and restores identity-safe methods');
     api.init();
     const beforeStaleRaf = api.getCounters().batches;
@@ -518,6 +576,7 @@
       await librarySync();
       await dynamicAndAttributes();
       await jumpNavigation();
+      await focusMode();
       await spaRootReplacement();
       await navigationAndNonInvasive();
       await bodyObserverQuiescence();

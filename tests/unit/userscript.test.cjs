@@ -212,6 +212,38 @@ test('next popular card selection skips viewport and chooses nearest without mut
   assert.equal(select([], 800), null);
 });
 
+test('previous popular card selection mirrors next selection without mutation', () => {
+  const select = load().__XHS_ENHANCED_TEST_API__.selectPreviousPopularCard;
+  function candidate(bottom, { connected = true, popular = true } = {}) {
+    return {
+      isConnected: connected,
+      classList: { contains: name => popular && name === 'xhs-enhanced-card--popular' },
+      getBoundingClientRect: () => ({ top: bottom - 200, bottom })
+    };
+  }
+  const boundary = candidate(0);
+  assert.equal(select([candidate(-600), candidate(-40), boundary]), boundary);
+  const far = candidate(-1200), nearest = candidate(-10), middle = candidate(-90);
+  const input = Object.freeze([far, nearest, middle]);
+  assert.equal(select(input), nearest);
+  assert.deepEqual(input, [far, nearest, middle]);
+  const tiedFirst = candidate(-10), tiedSecond = candidate(-10);
+  assert.equal(select([tiedFirst, tiedSecond]), tiedFirst);
+  assert.equal(select([candidate(50), candidate(-40, { connected: false }), candidate(-40, { popular: false })]), null);
+  assert.equal(select([]), null);
+  assert.equal(select(null), null);
+});
+
+test('focus-popular storage read is conservative', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  assert.equal(api.readStoredFocusPopular(null), false);
+  assert.equal(api.readStoredFocusPopular({ getItem: () => '1' }), true);
+  assert.equal(api.readStoredFocusPopular({ getItem: () => '0' }), false);
+  assert.equal(api.readStoredFocusPopular({ getItem: () => 'yes' }), false);
+  assert.equal(api.readStoredFocusPopular({ getItem: () => null }), false);
+  assert.equal(api.readStoredFocusPopular({ getItem() { throw new Error('blocked'); } }), false);
+});
+
 test('no-watermark cover URL strips XHS processing suffixes and process queries', () => {
   const api = load().__XHS_ENHANCED_TEST_API__;
   const raw = 'https://sns-webpic-qc.xhscdn.com/20240101/demo/foo.webp!nd_dft_wlteh_webp_3';

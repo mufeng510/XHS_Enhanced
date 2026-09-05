@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.5.1
-// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并快速跳转；笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面；一键把笔记链接发送到自建 XHS_ALL_IN_ONE 内容库保存
+// @version      1.6.0
+// @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并支持上/下一条热门笔记快速跳转；"只显示热门"开关模糊虚化非热门笔记（保留占位）；笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面；一键把笔记链接发送到自建 XHS_ALL_IN_ONE 内容库保存
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
 // @match        https://www.xiaohongshu.com/explore*
@@ -44,13 +44,21 @@
   const CARD_CLASS = 'xhs-enhanced-card--popular';
   const LIKE_CLASS = 'xhs-enhanced-like--popular';
   const SIGNATURE_ATTRIBUTE = 'data-xhs-enhanced-signature';
+  const JUMP_NAV_ID = 'xhs-enhanced-jump-nav';
   const JUMP_BUTTON_ID = 'xhs-enhanced-jump-next';
+  const JUMP_PREV_BUTTON_ID = 'xhs-enhanced-jump-prev';
   const JUMP_STATUS_ID = 'xhs-enhanced-jump-status';
   const THRESHOLD_CONTROL_ID = 'xhs-enhanced-threshold-control';
   const THRESHOLD_INPUT_ID = 'xhs-enhanced-threshold-input';
   const THRESHOLD_STATUS_ID = 'xhs-enhanced-threshold-status';
   const JUMP_BUTTON_TEXT = '下一条热门笔记';
+  const JUMP_PREV_BUTTON_TEXT = '上一条热门笔记';
   const LAST_NOTE_TEXT = '已经是最后一条热门笔记';
+  const FIRST_NOTE_TEXT = '已经是第一条热门笔记';
+  const FOCUS_TOGGLE_ID = 'xhs-enhanced-focus-toggle';
+  const FOCUS_TOGGLE_TEXT = '只显示热门';
+  const FOCUS_STORAGE_KEY = 'xhs-enhanced:focus-popular';
+  const DIMMED_CLASS = 'xhs-enhanced-card--dimmed';
   const CARD_ACTIONS_CLASS = 'xhs-enhanced-card-actions';
   const COPY_LINK_CLASS = 'xhs-enhanced-copy-link';
   const COPY_COVER_CLASS = 'xhs-enhanced-copy-cover';
@@ -127,13 +135,17 @@
   let initialized = false;
   let lifecycleToken = null;
   let lastUrl = '';
+  let jumpNav = null;
   let jumpButton = null;
+  let jumpPrevButton = null;
   let jumpStatus = null;
   let thresholdControl = null;
   let thresholdInput = null;
   let thresholdStatus = null;
   let threshold = DEFAULT_THRESHOLD;
   let jumpStatusTimer = null;
+  let focusPopular = false;
+  let focusToggle = null;
   let copyStatus = null;
   let copyStatusTimer = null;
   const coverBlobCache = new Map();
@@ -199,6 +211,42 @@
       }
     }
     return { ok: true, value: threshold, persisted };
+  }
+
+  function readStoredFocusPopular(storage = getStorage()) {
+    if (!storage) return false;
+    try {
+      return storage.getItem(FOCUS_STORAGE_KEY) === '1';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setFocusPopular(value, storage = getStorage()) {
+    focusPopular = Boolean(value);
+    let persisted = false;
+    if (storage) {
+      try {
+        storage.setItem(FOCUS_STORAGE_KEY, focusPopular ? '1' : '0');
+        persisted = true;
+      } catch (_) {
+        // The toggle still applies for this page when browser storage is unavailable.
+      }
+    }
+    return persisted;
+  }
+
+  function applyFocusToggleState() {
+    if (focusToggle) focusToggle.setAttribute('aria-pressed', focusPopular ? 'true' : 'false');
+  }
+
+  function onFocusToggleClick() {
+    const persisted = setFocusPopular(!focusPopular);
+    applyFocusToggleState();
+    showCopyStatus(focusPopular
+      ? (persisted ? '已开启：只显示热门笔记' : '已开启：只显示热门笔记（设置未能保存）')
+      : '已关闭：显示全部笔记');
+    scan(ROOT.document);
   }
 
   function getSecretStorage() {
@@ -1400,8 +1448,17 @@
     style.textContent = `
       .${CARD_CLASS}{outline:2px solid #ff2442!important;background:rgba(255,36,66,.07)!important;box-shadow:0 2px 10px rgba(255,36,66,.14)!important}
       .${LIKE_CLASS}{color:#ff2442!important;font-weight:700!important}
-      #${JUMP_BUTTON_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
-      #${JUMP_BUTTON_ID}:hover{background:#e61e3c}#${JUMP_BUTTON_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
+      #${JUMP_NAV_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;display:flex;gap:8px}
+      #${JUMP_PREV_BUTTON_ID},#${JUMP_BUTTON_ID}{border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
+      #${JUMP_PREV_BUTTON_ID}:hover,#${JUMP_BUTTON_ID}:hover{background:#e61e3c}
+      #${JUMP_PREV_BUTTON_ID}:focus-visible,#${JUMP_BUTTON_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
+      #${FOCUS_TOGGLE_ID}{border:0;border-radius:999px;padding:10px 16px;background:rgba(30,30,30,.9);color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
+      #${FOCUS_TOGGLE_ID}:hover{background:rgba(15,15,15,1)}
+      #${FOCUS_TOGGLE_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
+      #${FOCUS_TOGGLE_ID}[aria-pressed="true"]{background:#ff2442}
+      #${FOCUS_TOGGLE_ID}[aria-pressed="true"]:hover{background:#e61e3c}
+      .${DIMMED_CLASS}{filter:blur(8px) grayscale(.35);opacity:.55;transition:filter .18s ease,opacity .18s ease}
+      .${DIMMED_CLASS}:hover{filter:none;opacity:1}
       #${THRESHOLD_CONTROL_ID}{position:fixed;top:138px;right:24px;z-index:2147483646;display:flex;gap:6px;align-items:center;padding:8px;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.16);font:14px/1.4 system-ui,sans-serif}
       #${THRESHOLD_INPUT_ID}{width:72px;border:1px solid #aaa;border-radius:4px;padding:5px 6px;font:inherit}#${THRESHOLD_CONTROL_ID} button{border:0;border-radius:4px;padding:6px 9px;background:#ff2442;color:#fff;font:600 13px/1 system-ui,sans-serif;cursor:pointer}
       #${THRESHOLD_STATUS_ID}{position:fixed;top:190px;right:24px;z-index:2147483646;max-width:260px;padding:7px 10px;border-radius:6px;background:rgba(30,30,30,.92);color:#fff;font:13px/1.4 system-ui,sans-serif;pointer-events:none}
@@ -1440,6 +1497,7 @@
     const popular = Boolean(like && like.parsed.value > threshold);
 
     card.classList.toggle(CARD_CLASS, popular);
+    card.classList.toggle(DIMMED_CLASS, focusPopular && !popular);
     for (const stale of card.querySelectorAll(`.${LIKE_CLASS}`)) if (!like || stale !== like.node) stale.classList.remove(LIKE_CLASS);
     if (like) like.node.classList.toggle(LIKE_CLASS, popular);
 
@@ -1451,6 +1509,7 @@
   function cleanupCard(card) {
     if (!card || !card.querySelectorAll) return;
     card.classList.remove(CARD_CLASS);
+    card.classList.remove(DIMMED_CLASS);
     card.removeAttribute(SIGNATURE_ATTRIBUTE);
     removeCardActions(card);
     for (const node of card.querySelectorAll(`.${LIKE_CLASS}`)) node.classList.remove(LIKE_CLASS);
@@ -1476,6 +1535,22 @@
     return selected;
   }
 
+  // Mirror of selectNextPopularCard: the nearest popular card fully above the
+  // viewport (largest bottom that is still <= 0).
+  function selectPreviousPopularCard(cards) {
+    let selected = null;
+    let selectedBottom = -Infinity;
+    for (const card of cards || []) {
+      if (!card || !card.isConnected || !card.classList || !card.classList.contains(CARD_CLASS) || typeof card.getBoundingClientRect !== 'function') continue;
+      const rect = card.getBoundingClientRect();
+      const bottom = Number(rect && rect.bottom);
+      if (!Number.isFinite(bottom) || bottom > 0 || bottom <= selectedBottom) continue;
+      selected = card;
+      selectedBottom = bottom;
+    }
+    return selected;
+  }
+
   function clearJumpStatus() {
     if (jumpStatusTimer !== null) ROOT.clearTimeout(jumpStatusTimer);
     jumpStatusTimer = null;
@@ -1484,7 +1559,7 @@
     jumpStatus = null;
   }
 
-  function showJumpStatus() {
+  function showJumpStatus(message = LAST_NOTE_TEXT) {
     if (!ROOT.document || !ROOT.document.body) return;
     let node = jumpStatus && jumpStatus.isConnected ? jumpStatus : ROOT.document.getElementById(JUMP_STATUS_ID);
     if (!node) {
@@ -1492,10 +1567,11 @@
       node.id = JUMP_STATUS_ID;
       node.setAttribute('role', 'status');
       node.setAttribute('aria-live', 'polite');
-      node.textContent = LAST_NOTE_TEXT;
+      node.textContent = message;
       ROOT.document.body.appendChild(node);
     }
     jumpStatus = node;
+    node.textContent = message;
     if (jumpStatusTimer !== null) ROOT.clearTimeout(jumpStatusTimer);
     jumpStatusTimer = ROOT.setTimeout(() => { jumpStatusTimer = null; clearJumpStatus(); }, 3000);
   }
@@ -1516,8 +1592,37 @@
     showJumpStatus();
   }
 
+  function jumpToPreviousPopularCard() {
+    if (!ROOT.document) return;
+    const target = selectPreviousPopularCard(ROOT.document.querySelectorAll(`.${CARD_CLASS}`));
+    if (target) {
+      clearJumpStatus();
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    if (typeof ROOT.scrollTo === 'function') ROOT.scrollTo({ top: 0, behavior: 'smooth' });
+    showJumpStatus(FIRST_NOTE_TEXT);
+  }
+
   function ensureJumpUi() {
     if (!ROOT.document || !ROOT.document.body) return;
+    let nav = jumpNav && jumpNav.isConnected ? jumpNav : ROOT.document.getElementById(JUMP_NAV_ID);
+    if (!nav) {
+      nav = ROOT.document.createElement('div');
+      nav.id = JUMP_NAV_ID;
+      ROOT.document.body.appendChild(nav);
+    }
+    jumpNav = nav;
+    let prev = jumpPrevButton && jumpPrevButton.isConnected ? jumpPrevButton : ROOT.document.getElementById(JUMP_PREV_BUTTON_ID);
+    if (!prev) {
+      prev = ROOT.document.createElement('button');
+      prev.id = JUMP_PREV_BUTTON_ID;
+      prev.type = 'button';
+      prev.textContent = JUMP_PREV_BUTTON_TEXT;
+      prev.setAttribute('aria-label', JUMP_PREV_BUTTON_TEXT);
+      prev.addEventListener('click', jumpToPreviousPopularCard);
+    }
+    jumpPrevButton = prev;
     let button = jumpButton && jumpButton.isConnected ? jumpButton : ROOT.document.getElementById(JUMP_BUTTON_ID);
     if (!button) {
       button = ROOT.document.createElement('button');
@@ -1526,9 +1631,24 @@
       button.textContent = JUMP_BUTTON_TEXT;
       button.setAttribute('aria-label', JUMP_BUTTON_TEXT);
       button.addEventListener('click', jumpToNextPopularCard);
-      ROOT.document.body.appendChild(button);
     }
     jumpButton = button;
+    let toggle = focusToggle && focusToggle.isConnected ? focusToggle : ROOT.document.getElementById(FOCUS_TOGGLE_ID);
+    if (!toggle) {
+      toggle = ROOT.document.createElement('button');
+      toggle.id = FOCUS_TOGGLE_ID;
+      toggle.type = 'button';
+      toggle.textContent = FOCUS_TOGGLE_TEXT;
+      toggle.setAttribute('aria-label', FOCUS_TOGGLE_TEXT);
+      toggle.setAttribute('aria-pressed', focusPopular ? 'true' : 'false');
+      toggle.addEventListener('click', onFocusToggleClick);
+    }
+    focusToggle = toggle;
+    // Move buttons left over from an older script version into the nav row, but
+    // only when needed: unconditional append would re-trigger the observer forever.
+    if (prev.parentElement !== nav) nav.appendChild(prev);
+    if (button.parentElement !== nav) nav.appendChild(button);
+    if (toggle.parentElement !== nav) nav.appendChild(toggle);
   }
 
   function showThresholdStatus(message) {
@@ -1605,12 +1725,17 @@
 
   function removeJumpUi() {
     clearJumpStatus();
-    const button = jumpButton && jumpButton.isConnected ? jumpButton : ROOT.document && ROOT.document.getElementById(JUMP_BUTTON_ID);
-    if (button) {
-      button.removeEventListener('click', jumpToNextPopularCard);
-      button.remove();
+    const nav = jumpNav && jumpNav.isConnected ? jumpNav : ROOT.document && ROOT.document.getElementById(JUMP_NAV_ID);
+    if (nav) nav.remove();
+    // Also drop stray buttons that an older script version may have left on body.
+    for (const id of [JUMP_PREV_BUTTON_ID, JUMP_BUTTON_ID, FOCUS_TOGGLE_ID]) {
+      const stray = ROOT.document && ROOT.document.getElementById(id);
+      if (stray) stray.remove();
     }
+    jumpNav = null;
     jumpButton = null;
+    jumpPrevButton = null;
+    focusToggle = null;
   }
 
   function libraryAccountOptionLabel(account) {
@@ -1960,7 +2085,7 @@
         for (const node of mutation.addedNodes) schedule(node);
         for (const node of mutation.removedNodes) {
           if (node.nodeType !== 1) continue;
-          node.classList.remove(LIKE_CLASS, CARD_CLASS);
+          node.classList.remove(LIKE_CLASS, CARD_CLASS, DIMMED_CLASS);
           node.removeAttribute(SIGNATURE_ATTRIBUTE);
           for (const stale of node.querySelectorAll(`.${LIKE_CLASS}`)) stale.classList.remove(LIKE_CLASS);
         }
@@ -2041,6 +2166,7 @@
     lifecycleToken = { active: true };
     destroyed = false;
     threshold = readStoredThreshold();
+    focusPopular = readStoredFocusPopular();
     ensureStyle();
     bindObserverRoot(selectObserverRoot());
     if (ROOT.document.documentElement && typeof ROOT.MutationObserver === 'function') {
@@ -2085,7 +2211,7 @@
   }
 
   const pureApi = Object.freeze({
-    parseLikeCount, parseThreshold, readStoredThreshold, isTargetRoute, isProfileRoute, isDetailRoute, getCurrentRoute, signatureFor, selectNextPopularCard,
+    parseLikeCount, parseThreshold, readStoredThreshold, readStoredFocusPopular, isTargetRoute, isProfileRoute, isDetailRoute, getCurrentRoute, signatureFor, selectNextPopularCard, selectPreviousPopularCard,
     getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue, extractTokensFromState, findTokenForNoteIdInState, getFallbackTokenForNoteId, clearFallbackTokenCache,
     toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, coverRequestHeaders, pickLargestFromSrcset,
     parseBaseUrl, readLibraryConfig, parseTokenExp, buildCrawlPayload, buildDetailNoteUrl, resolveSaveUrlFromCard,
@@ -2097,6 +2223,7 @@
       setTestRoute(pathname, scheduleChange = true) { routeProvider = () => String(pathname || ''); lastUrl = ''; if (scheduleChange) schedule(ROOT.document); },
       clearTestRoute() { routeProvider = null; lastUrl = ''; schedule(ROOT.document); },
       scan: () => scan(ROOT.document), flush, init, destroy, setThreshold: value => setThreshold(value), getThreshold: () => threshold,
+      setFocusPopular: (value, storage) => setFocusPopular(value, storage), getFocusPopular: () => focusPopular,
       getCounters: () => Object.assign({}, counters, { bindings: eventBindings.length, ownedHistoryWrappers: Number(Boolean(ownedPushState)) + Number(Boolean(ownedReplaceState)), observerRootIsBody: observerRoot === ROOT.document.body })
     });
     ROOT.__XHS_ENHANCED_TEST_API__ = testApi;
