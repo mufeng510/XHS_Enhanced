@@ -314,6 +314,52 @@ test('coverUrlCandidates keeps bare note_pre_post urls and adds processed fallba
 });
 
 
+test('buildCoverFileName prefers the mime type, strips CDN suffixes and sanitizes the note id', () => {
+  const api = load('/search_result').__XHS_ENHANCED_TEST_API__;
+  assert.equal(api.buildCoverFileName('abc123', 'https://sns-webpic-qc.xhscdn.com/a.webp', 'image/webp'), 'xhs-note-abc123.webp');
+  assert.equal(api.buildCoverFileName('', 'https://x.com/a.png', 'image/jpeg'), 'xhs-cover.jpg');
+  assert.equal(api.buildCoverFileName('a/b', 'https://x.com/a.png!nd_dft', ''), 'xhs-note-ab.png');
+  assert.equal(api.buildCoverFileName('n1', 'https://x.com/a.png!nd_dft_wlteh_webp_3?imageView2/2', ''), 'xhs-note-n1.png');
+  assert.equal(api.buildCoverFileName('n1', '', ''), 'xhs-note-n1.jpg');
+  assert.equal(api.buildCoverFileName('n1', 'https://x.com/a.jpeg', ''), 'xhs-note-n1.jpg');
+  assert.equal(api.buildCoverFileName(null, null, null), 'xhs-cover.jpg');
+});
+
+test('cardNoteTargetId groups anchors by note id so real search cards stay reliable', () => {
+  const api = load('/search_result').__XHS_ENHANCED_TEST_API__;
+  function mockCard(hrefs) {
+    return {
+      querySelectorAll() { return hrefs.map(href => ({ getAttribute: name => (name === 'href' ? href : null) })); }
+    };
+  }
+  assert.equal(api.cardNoteTargetId(mockCard(['/search_result/s1?xsec_token=t'])), 's1');
+  // Real Xiaohongshu search cards carry a .cover and a .title anchor to the SAME note.
+  assert.equal(api.cardNoteTargetId(mockCard(['/search_result/s1?xsec_token=tA', '/search_result/s1?xsec_token=tB'])), 's1');
+  assert.equal(api.cardNoteTargetId(mockCard(['/explore/x1', '/discovery/item/x2'])), '');
+  assert.equal(api.cardNoteTargetId(mockCard([])), '');
+  assert.equal(api.cardNoteTargetId(null), '');
+  assert.equal(api.cardNoteTargetId(mockCard(['/not_a_note', '/search_result?keyword=test'])), '');
+});
+
+test('resolveCardNoteLink prefers the anchor carrying xsec_token', () => {
+  const api = load('/search_result').__XHS_ENHANCED_TEST_API__;
+  function mockCard(hrefs) {
+    return {
+      querySelectorAll() { return hrefs.map(href => ({ getAttribute: name => (name === 'href' ? href : null) })); }
+    };
+  }
+  assert.equal(
+    api.resolveCardNoteLink(mockCard(['/search_result/s9', '/search_result/s9?xsec_token=tok9'])),
+    'https://www.xiaohongshu.com/explore/s9?xsec_token=tok9&xsec_source=pc_feed'
+  );
+  assert.equal(
+    api.resolveCardNoteLink(mockCard(['/search_result/s10', '/search_result/s10'])),
+    'https://www.xiaohongshu.com/explore/s10'
+  );
+  assert.equal(api.resolveCardNoteLink(mockCard([])), '');
+  assert.equal(api.resolveCardNoteLink(null), '');
+});
+
 test('findTokenForNoteIdInState early-exits for one note without full walk side effects', () => {
   const api = load().__XHS_ENHANCED_TEST_API__;
   const state = {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.6.0
+// @version      1.7.0
 // @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并支持上/下一条热门笔记快速跳转；"只显示热门"开关模糊虚化非热门笔记（保留占位）；笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面；一键把笔记链接发送到自建 XHS_ALL_IN_ONE 内容库保存
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
@@ -62,14 +62,20 @@
   const CARD_ACTIONS_CLASS = 'xhs-enhanced-card-actions';
   const COPY_LINK_CLASS = 'xhs-enhanced-copy-link';
   const COPY_COVER_CLASS = 'xhs-enhanced-copy-cover';
+  const DOWNLOAD_COVER_CLASS = 'xhs-enhanced-download-cover';
   const CARD_ACTIONS_ATTRIBUTE = 'data-xhs-enhanced-actions';
   const COPY_LINK_TEXT = '复制链接';
   const COPY_COVER_TEXT = '复制封面';
+  const DOWNLOAD_COVER_TEXT = '下载封面';
   const COPY_LINK_OK = '已复制笔记链接';
   const COPY_LINK_FAIL = '链接复制失败';
   const COPY_COVER_OK = '已复制笔记封面';
   const COPY_COVER_FAIL = '封面复制失败';
   const COPY_COVER_AUTH_FAIL = '封面复制失败（需油猴授权）';
+  const DOWNLOAD_COVER_OK = '已下载笔记封面';
+  const DOWNLOAD_COVER_FAIL = '封面下载失败';
+  const DOWNLOAD_COVER_AUTH_FAIL = '封面下载失败（需油猴授权）';
+  const DOWNLOAD_COVER_MISSING = '未找到笔记封面';
   const COVER_IMAGE_SELECTORS = 'img.cover,img[src*="sns-img"],img[src*="xhscdn"],picture img,article img,section.note-item img,.note-item img';
   const COPY_STATUS_ID = 'xhs-enhanced-copy-status';
   const SHARE_BASE = 'https://www.xiaohongshu.com/';
@@ -151,6 +157,7 @@
   const coverBlobCache = new Map();
   const COVER_CACHE_LIMIT = 80;
   let copyCoverInFlight = false;
+  let downloadCoverInFlight = false;
   let saveInFlight = false;
   let libraryToggle = null;
   let libraryPanel = null;
@@ -545,16 +552,27 @@
     return link;
   }
 
-  function extractNoteLink(card) {
-    if (!card || !card.querySelector) return '';
-    const link = card.querySelector(SELECTORS.noteLinks);
-    if (!link) return '';
-    const href = link.getAttribute('href') || link.getAttribute('xhs:href') || '';
+  function resolveCardNoteLink(card) {
+    if (!card || !card.querySelectorAll) return '';
+    let tokenHref = '';
+    let fallbackHref = '';
+    for (const link of Array.from(card.querySelectorAll(SELECTORS.noteLinks))) {
+      const href = link.getAttribute('href') || link.getAttribute('xhs:href') || '';
+      const id = getNoteIdFromHref(href);
+      if (!id) continue;
+      if (!tokenHref && getXsecTokenFromHref(href)) tokenHref = href;
+      else if (!fallbackHref) fallbackHref = href;
+    }
+    const href = tokenHref || fallbackHref;
     const id = getNoteIdFromHref(href);
     if (!id) return '';
     let token = getXsecTokenFromHref(href);
     if (!token) token = getFallbackTokenForNoteId(id);
     return buildShareLink(id, token);
+  }
+
+  function extractNoteLink(card) {
+    return resolveCardNoteLink(card);
   }
 
   function toNoWatermarkCoverUrl(input) {
@@ -690,6 +708,39 @@
     return headers;
   }
 
+  function resolveCoverExtFromMime(mimeType) {
+    const mime = normalizeSpace(String(mimeType == null ? '' : mimeType).split(';')[0]).toLowerCase();
+    if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg';
+    if (mime === 'image/png') return 'png';
+    if (mime === 'image/webp') return 'webp';
+    if (mime === 'image/avif') return 'avif';
+    if (mime === 'image/gif') return 'gif';
+    return '';
+  }
+
+  function resolveCoverExtFromUrl(sourceUrl) {
+    let path = '';
+    try {
+      const base = (PAGE.location && PAGE.location.href) || (ROOT.location && ROOT.location.href) || 'https://www.xiaohongshu.com/';
+      path = new URL(String(sourceUrl == null ? '' : sourceUrl), base).pathname;
+    } catch (_) {
+      path = String(sourceUrl == null ? '' : sourceUrl).split('#')[0].split('?')[0];
+    }
+    // XHS processed variants append '!nd_*' after the real extension.
+    path = String(path).replace(/!.*$/, '');
+    const match = path.match(/\.(jpe?g|png|webp|avif|gif)$/i);
+    if (!match) return '';
+    const ext = match[1].toLowerCase();
+    return ext === 'jpe' || ext === 'jpeg' ? 'jpg' : ext;
+  }
+
+  function buildCoverFileName(noteId, sourceUrl, mimeType) {
+    const sanitizedId = String(noteId == null ? '' : noteId).replace(/[^A-Za-z0-9_-]/g, '');
+    const baseName = sanitizedId ? 'xhs-note-' + sanitizedId : 'xhs-cover';
+    const ext = resolveCoverExtFromMime(mimeType) || resolveCoverExtFromUrl(sourceUrl) || 'jpg';
+    return baseName + '.' + ext;
+  }
+
   function getGmRequest() {
     if (typeof GM_xmlhttpRequest === 'function') return GM_xmlhttpRequest;
     if (typeof GM === 'object' && GM && typeof GM.xmlHttpRequest === 'function') return GM.xmlHttpRequest;
@@ -755,6 +806,37 @@
       if (PAGE && typeof PAGE.Blob === "function") return PAGE.Blob;
     } catch (_) {}
     return ROOT.Blob;
+  }
+
+  function getPageUrlCtor() {
+    try {
+      if (PAGE && typeof PAGE.URL === "function") return PAGE.URL;
+    } catch (_) {}
+    return ROOT.URL;
+  }
+
+  function triggerCoverDownload(blob, filename) {
+    if (!blob || !ROOT.document) return false;
+    const UrlCtor = getPageUrlCtor();
+    if (!UrlCtor || typeof UrlCtor.createObjectURL !== 'function') return false;
+    let objectUrl = '';
+    try {
+      objectUrl = UrlCtor.createObjectURL(blob);
+      const anchor = ROOT.document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = filename || 'xhs-cover.jpg';
+      anchor.rel = 'noopener';
+      anchor.style.display = 'none';
+      (ROOT.document.body || ROOT.document.documentElement).appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      // Revoke late so the browser has time to start reading the blob URL.
+      ROOT.setTimeout(() => { try { UrlCtor.revokeObjectURL(objectUrl); } catch (_) {} }, 4000);
+    }
   }
 
   function transferBlobToPage(blob) {
@@ -1202,6 +1284,27 @@
     });
   }
 
+  function onDownloadCover(card) {
+    if (downloadCoverInFlight) return;
+    const src = extractCoverUrl(card);
+    if (!src) { showCopyStatus(DOWNLOAD_COVER_MISSING); return; }
+    downloadCoverInFlight = true;
+    const blobPromise = loadCoverPngBlob(src).then(result => {
+      if (!result.ok || !result.blob) throw new Error("cover-load-failed");
+      return result.blob;
+    });
+    blobPromise
+      .then(blob => transferBlobToPage(blob))
+      .then(pageBlob => {
+        downloadCoverInFlight = false;
+        const ok = triggerCoverDownload(pageBlob, buildCoverFileName(cardNoteTargetId(card), src, pageBlob ? pageBlob.type : ''));
+        showCopyStatus(ok ? DOWNLOAD_COVER_OK : (getGmRequest() ? DOWNLOAD_COVER_FAIL : DOWNLOAD_COVER_AUTH_FAIL));
+      }, () => {
+        downloadCoverInFlight = false;
+        showCopyStatus(getGmRequest() ? DOWNLOAD_COVER_FAIL : DOWNLOAD_COVER_AUTH_FAIL);
+      });
+  }
+
   function resolveSaveUrlFromCard(card) {
     const link = extractNoteLink(card);
     if (!link) return { ok: false, url: '', reason: 'no-link' };
@@ -1349,13 +1452,19 @@
       coverButton.textContent = COPY_COVER_TEXT;
       coverButton.setAttribute('aria-label', COPY_COVER_TEXT);
       coverButton.addEventListener('click', () => onCopyCover(card));
+      const downloadButton = ROOT.document.createElement('button');
+      downloadButton.type = 'button';
+      downloadButton.className = DOWNLOAD_COVER_CLASS;
+      downloadButton.textContent = DOWNLOAD_COVER_TEXT;
+      downloadButton.setAttribute('aria-label', DOWNLOAD_COVER_TEXT);
+      downloadButton.addEventListener('click', () => onDownloadCover(card));
       const saveButton = ROOT.document.createElement('button');
       saveButton.type = 'button';
       saveButton.className = SAVE_LIBRARY_CLASS;
       saveButton.textContent = SAVE_LIBRARY_TEXT;
       saveButton.setAttribute('aria-label', SAVE_LIBRARY_TEXT);
       saveButton.addEventListener('click', () => onSaveToLibrary(card, saveButton));
-      container.append(linkButton, coverButton, saveButton);
+      container.append(linkButton, coverButton, downloadButton, saveButton);
       card.appendChild(container);
     }
     card.setAttribute(CARD_ACTIONS_ATTRIBUTE, getCurrentRoute());
@@ -1395,10 +1504,22 @@
     return null;
   }
 
+  function cardNoteTargetId(card) {
+    if (!card || !card.querySelectorAll) return '';
+    let targetId = '';
+    for (const link of Array.from(card.querySelectorAll(SELECTORS.noteLinks))) {
+      const href = link.getAttribute('href') || link.getAttribute('xhs:href') || '';
+      const id = getNoteIdFromHref(href);
+      if (!id) continue;
+      if (targetId && targetId !== id) return '';
+      targetId = id;
+    }
+    return targetId;
+  }
+
   function isReliableCard(card) {
     if (!card || !card.querySelector) return false;
-    const links = card.querySelectorAll(SELECTORS.noteLinks);
-    return links.length === 1 && Boolean(card.querySelector(SELECTORS.likeNodes));
+    return Boolean(cardNoteTargetId(card)) && Boolean(card.querySelector(SELECTORS.likeNodes));
   }
 
   function findCard(node) {
@@ -1427,13 +1548,13 @@
       const element = link.nodeType === 1 ? link : link.parentElement;
       if (!element) continue;
       const card = element.closest(SELECTORS.cardContainers);
-      if (card && card.isConnected && card.querySelectorAll(SELECTORS.noteLinks).length === 1) cards.add(card);
+      if (card && card.isConnected && cardNoteTargetId(card)) cards.add(card);
     }
     return Array.from(cards);
   }
 
-  function applyProfileActions() {
-    if (!ROOT.document || !isProfileRoute(getCurrentRoute())) return;
+  function applyCardActionsFallback() {
+    if (!ROOT.document || !isTargetRoute(getCurrentRoute())) return;
     for (const card of discoverLinkCards(ROOT.document)) ensureCardActions(card);
   }
 
@@ -1485,6 +1606,8 @@
       .${CARD_ACTIONS_CLASS} button{border:0;border-radius:6px;padding:5px 9px;background:rgba(255,36,66,.92);color:#fff;font:600 12px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.18)}
       .${CARD_ACTIONS_CLASS} button:hover{background:#e61e3c}
       .${COPY_COVER_CLASS}{background:rgba(30,30,30,.82)!important}
+      .${DOWNLOAD_COVER_CLASS}{background:rgba(37,99,235,.92)!important}
+      .${DOWNLOAD_COVER_CLASS}:hover{background:rgba(29,78,216,1)!important}
     `;
     (ROOT.document.head || ROOT.document.documentElement).appendChild(style);
   }
@@ -2049,7 +2172,7 @@
       const card = findCard(candidate) || (isReliableCard(candidate) ? candidate : null);
       if (card) renderCard(card);
     }
-    applyProfileActions();
+    applyCardActionsFallback();
   }
 
   function schedule(root) {
@@ -2213,8 +2336,8 @@
   const pureApi = Object.freeze({
     parseLikeCount, parseThreshold, readStoredThreshold, readStoredFocusPopular, isTargetRoute, isProfileRoute, isDetailRoute, getCurrentRoute, signatureFor, selectNextPopularCard, selectPreviousPopularCard,
     getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue, extractTokensFromState, findTokenForNoteIdInState, getFallbackTokenForNoteId, clearFallbackTokenCache,
-    toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, coverRequestHeaders, pickLargestFromSrcset,
-    parseBaseUrl, readLibraryConfig, parseTokenExp, buildCrawlPayload, buildDetailNoteUrl, resolveSaveUrlFromCard,
+    toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, coverRequestHeaders, pickLargestFromSrcset, buildCoverFileName,
+    parseBaseUrl, readLibraryConfig, parseTokenExp, buildCrawlPayload, buildDetailNoteUrl, resolveSaveUrlFromCard, cardNoteTargetId, resolveCardNoteLink,
     READ_ATTRIBUTES, SELECTORS
   });
 

@@ -44,4 +44,11 @@ for (const required of ["'xhs-enhanced-jump-next'", "'xhs-enhanced-jump-prev'", 
 assert(source.includes("'xhs-enhanced:focus-popular'"), 'focus-mode persistence key required');
 assert(source.includes('selectPreviousPopularCard'), 'previous-popular-card selection required');
 assert(/filter:\s*blur\(/.test(source), 'focus-mode blur style required');
+assert(source.includes("'xhs-enhanced-download-cover'"), 'per-note card download-cover button class required');
+assert(source.includes("'下载封面'"), 'per-note card download-cover button label required');
+assert(source.includes('buildCoverFileName'), 'cover download file-name builder required');
+assert(source.includes('cardNoteTargetId'), 'note-id grouping helper required so dual-anchor search cards stay reliable');
+assert(source.includes('resolveCardNoteLink'), 'per-card note link resolver required');
+assert(source.includes('applyCardActionsFallback'), 'card-action fallback must be generalized beyond the profile-only gate');
+assert(!source.includes('applyProfileActions'), 'the profile-only card-action gate name must be gone after generalization');
 console.log('Static checks passed.');

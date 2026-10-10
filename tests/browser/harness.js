@@ -75,6 +75,15 @@
     assert(sandbox.querySelector('[data-case="no-link"]').getAttribute('data-xhs-enhanced-signature') === null, 'unreliable card ignored');
     assert(sandbox.querySelectorAll('.xhs-enhanced-publish-time').length === 0, 'no publication-time labels are generated');
     assert(document.querySelectorAll('#xhs-enhanced-style').length === 1, 'single global style');
+    // Real search cards expose TWO anchors to the same note (.cover + .title); they must still get actions.
+    const dual = card('search-dual-anchor');
+    const dualActions = dual && dual.querySelector('.xhs-enhanced-card-actions');
+    assert(Boolean(dualActions), 'search card with two note anchors receives a card-actions container');
+    assert(dualActions.querySelectorAll('.xhs-enhanced-copy-link').length === 1, 'search dual-anchor card has exactly one copy-link button');
+    assert(dualActions.querySelectorAll('.xhs-enhanced-copy-cover').length === 1, 'search dual-anchor card has exactly one copy-cover button');
+    assert(dualActions.querySelectorAll('.xhs-enhanced-download-cover').length === 1, 'search dual-anchor card has exactly one download-cover button');
+    assert(dualActions.querySelectorAll('.xhs-enhanced-save-library').length === 1, 'search dual-anchor card has exactly one save-library button');
+    assert(dualActions.querySelector('.xhs-enhanced-download-cover').textContent === '下载封面', 'search dual-anchor card download-cover button label');
   }
 
   async function profile() {
@@ -91,6 +100,7 @@
       assert(Boolean(container), `profile card has copy actions container: ${name}`);
       assert(container.querySelector('.xhs-enhanced-copy-link').textContent === '复制链接', `profile card copy-link button label: ${name}`);
       assert(container.querySelector('.xhs-enhanced-copy-cover').textContent === '复制封面', `profile card copy-cover button label: ${name}`);
+      assert(container.querySelector('.xhs-enhanced-download-cover').textContent === '下载封面', `profile card download-cover button label: ${name}`);
       assert(container.querySelector('.xhs-enhanced-save-library').textContent === '保存入库', `profile card save-library button label: ${name}`);
     }
     const searchCard = card('profile-100');

@@ -1,6 +1,6 @@
 {
   "name": "xhs-web-enhancement",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "description": "零依赖油猴脚本 + 本地验证工具链，为小红书网页版搜索页/用户主页增加可配置热门阈值高亮、上/下一条热门笔记快速跳转与只显示热门（模糊非热门）模式，并支持一键保存笔记到自建 XHS_ALL_IN_ONE 内容库",
   "repository": {
@@ -25,6 +25,7 @@
     "check": "node scripts/static-check.cjs",
     "test:unit": "node --test --test-isolation=none tests/unit/userscript.test.cjs",
     "test:browser": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-browser-tests.ps1",
+    "test:browser:unix": "bash scripts/run-browser-tests.sh",
     "test": "npm run check && npm run test:unit && npm run test:browser"
   }
 }
