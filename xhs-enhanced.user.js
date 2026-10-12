@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.7.0
+// @version      1.8.0
 // @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并支持上/下一条热门笔记快速跳转；"只显示热门"开关模糊虚化非热门笔记（保留占位）；笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面；一键把笔记链接发送到自建 XHS_ALL_IN_ONE 内容库保存
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
@@ -684,9 +684,11 @@
       if (!text || out.indexOf(text) >= 0) return;
       out.push(text);
     };
-    // Signed/displayed URL first, then de-processed, then one derivative max.
-    push(original);
+    // De-processed original object first: it is the untouched master (no watermark,
+    // no rescale, no second encode), so downloads land on the stored JPEG instead of
+    // the '!nd_*_webp_*' derivative the card happens to render.
     push(normalized);
+    push(original);
     if (normalized && !/!/.test(normalized.split("?")[0])) {
       push(normalized.replace(/([?].*)?$/, "!nd_dft_wlteh_webp_3$1"));
     }

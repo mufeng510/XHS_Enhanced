@@ -254,8 +254,8 @@ test('no-watermark cover URL strips XHS processing suffixes and process queries'
   );
   assert.equal(api.toNoWatermarkCoverUrl('data:image/png;base64,abc'), 'data:image/png;base64,abc');
   const candidates = api.coverUrlCandidates(raw);
-  assert.equal(candidates[0], raw);
-  assert.equal(candidates[1], 'https://sns-webpic-qc.xhscdn.com/20240101/demo/foo.webp');
+  assert.equal(candidates[0], 'https://sns-webpic-qc.xhscdn.com/20240101/demo/foo.webp');
+  assert.equal(candidates[1], raw);
   assert.ok(candidates.length >= 2 && candidates.length <= 3);
   assert.equal(api.pickLargestFromSrcset('a.jpg 100w, b.jpg 800w, c.jpg 400w'), 'b.jpg');
 });
@@ -311,6 +311,19 @@ test('coverUrlCandidates keeps bare note_pre_post urls and adds processed fallba
   assert.ok(list.some(u => u.indexOf('!nd_dft_wlteh_webp_3') >= 0));
   assert.ok(list.length <= 3);
   assert.equal(list.some(u => u.indexOf('!nd_prv_wlteh_webp_3') >= 0), false);
+});
+
+test('coverUrlCandidates tries the untouched master before any webp derivative', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  // Cards render the '!nd_dft_wlteh_webp_3' transcode, but the stored object is a jpg master.
+  const rendered = 'https://sns-webpic-qc.xhscdn.com/20240101/demo/note.jpg!nd_dft_wlteh_webp_3';
+  const list = api.coverUrlCandidates(rendered);
+  assert.equal(list[0], 'https://sns-webpic-qc.xhscdn.com/20240101/demo/note.jpg');
+  assert.equal(list[0].indexOf('!nd_'), -1, 'master url must stay free of processing suffixes');
+  // The rendered url and the webp derivative are both kept as fallbacks.
+  assert.ok(list.indexOf(rendered) >= 1);
+  assert.ok(list.slice(1).some(u => u.indexOf('!nd_dft_wlteh_webp_3') >= 0));
+  assert.equal(api.buildCoverFileName('n1', list[0], 'image/jpeg'), 'xhs-note-n1.jpg');
 });
 
 
