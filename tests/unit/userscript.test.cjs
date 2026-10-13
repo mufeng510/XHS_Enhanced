@@ -10,7 +10,7 @@ function characterCount(content) {
   return Array.from(content).length;
 }
 
-function load(pathname = '/real/path', testMode = true, localStorage) {
+function load(pathname = '/real/path', testMode = true, localStorage, extras) {
   class TestBlob {
     constructor(parts = [], opts = {}) {
       const chunks = [];
@@ -43,6 +43,7 @@ function load(pathname = '/real/path', testMode = true, localStorage) {
     URLSearchParams
   };
   if (localStorage !== undefined) context.localStorage = localStorage;
+  if (extras) Object.assign(context, extras);
   context.globalThis = context;
   vm.runInNewContext(fs.readFileSync('xhs-enhanced.user.js', 'utf8'), context);
   return context;
@@ -303,27 +304,165 @@ test('coverRequestHeaders returns xiaohongshu referer', () => {
   assert.ok(headers.Accept && headers.Accept.indexOf('image/') >= 0);
 });
 
-test('coverUrlCandidates keeps bare note_pre_post urls and adds processed fallbacks', () => {
+// Object paths below were verified against ci.xiaohongshu.com; the expected format is
+// recorded in each test because the master is whatever the uploader uploaded.
+test('toCdnObjectPath keeps the scene segment of every signed cover url shape', () => {
   const api = load().__XHS_ENHANCED_TEST_API__;
-  const bare = 'https://sns-webpic-qc.xhscdn.com/202608071123/a9c1e390ff7f07b61ce850daf65b7a40/note_pre_post_uhdr/1040g3r03220lne1mmu1049s0ismhjq9d8um703o';
-  const list = api.coverUrlCandidates(bare);
-  assert.equal(list[0], bare);
-  assert.ok(list.some(u => u.indexOf('!nd_dft_wlteh_webp_3') >= 0));
-  assert.ok(list.length <= 3);
-  assert.equal(list.some(u => u.indexOf('!nd_prv_wlteh_webp_3') >= 0), false);
+  // -> 200 image/jpeg 641 KB
+  assert.equal(
+    api.toCdnObjectPath('https://sns-webpic-qc.xhscdn.com/202601131644/e30d294b3ad5957a22d12421fac6da64/notes_pre_post/1040g3k031qtmfr5pno004a62p2ihj0itmhtlqk0!nd_dft_wlteh_webp_3'),
+    'notes_pre_post/1040g3k031qtmfr5pno004a62p2ihj0itmhtlqk0'
+  );
+  // Older posts carry no scene segment -> 200 image/webp 177 KB
+  assert.equal(
+    api.toCdnObjectPath('https://sns-webpic-qc.xhscdn.com/202403262133/dc00a48e53c948cab26b392ecd22bf60/1000g0082ek68fgsh80005nngdu5g83b7bua2kb8!nc_n_webp_mw_1'),
+    '1000g0082ek68fgsh80005nngdu5g83b7bua2kb8'
+  );
+  // HDR masters live under their own scene -> 200 image/heic 2867 KB
+  assert.equal(
+    api.toCdnObjectPath('https://sns-webpic-qc.xhscdn.com/202608071123/a9c1e390ff7f07b61ce850daf65b7a40/note_pre_post_uhdr/1040g3r03220lne1mmu1049s0ismhjq9d8um703o'),
+    'note_pre_post_uhdr/1040g3r03220lne1mmu1049s0ismhjq9d8um703o'
+  );
+  // A process query must not leak into the object key.
+  assert.equal(
+    api.toCdnObjectPath('https://sns-webpic-qc.xhscdn.com/202601131644/e30d294b3ad5957a22d12421fac6da64/notes_pre_post/1040g3k031qtmfr5pno004a62p2ihj0itmhtlqk0?imageView2/2/w/format/png'),
+    'notes_pre_post/1040g3k031qtmfr5pno004a62p2ihj0itmhtlqk0'
+  );
+  // Non-object urls must not produce a probe url.
+  assert.equal(api.toCdnObjectPath('data:image/png;base64,abc'), '');
+  assert.equal(api.toCdnObjectPath(''), '');
+  assert.equal(api.toCdnObjectPath('https://cdn.example.com/'), '');
 });
 
-test('coverUrlCandidates tries the untouched master before any webp derivative', () => {
+test('coverUrlCandidates probes the ci master before any webpic derivative', () => {
   const api = load().__XHS_ENHANCED_TEST_API__;
-  // Cards render the '!nd_dft_wlteh_webp_3' transcode, but the stored object is a jpg master.
+  const rendered = 'https://sns-webpic-qc.xhscdn.com/202601131644/e30d294b3ad5957a22d12421fac6da64/notes_pre_post/1040g3k031qtmfr5pno004a62p2ihj0itmhtlqk0!nd_dft_wlteh_webp_3';
+  const list = api.coverUrlCandidates(rendered);
+  const key = 'notes_pre_post/1040g3k031qtmfr5pno004a62p2ihj0itmhtlqk0';
+  // Master first, free of the '!suffix' that would force a webp transcode.
+  assert.equal(list[0], 'https://ci.xiaohongshu.com/' + key);
+  assert.equal(list[0].indexOf('!'), -1, 'master url must stay free of processing suffixes');
+  // Server-side jpeg transcode, then the xhscdn mirror of the same object.
+  assert.equal(list[1], 'https://ci.xiaohongshu.com/' + key + '?imageView2/format/jpeg');
+  assert.equal(api.isForcedJpegCandidate(list[1]), true);
+  assert.equal(list[2], 'https://sns-img-hw.xhscdn.com/' + key);
+  // The webpic chain survives as the tail so a ci outage degrades instead of failing.
+  assert.ok(list.indexOf(rendered) >= 3);
+  assert.ok(list.some(u => u.indexOf('!nd_dft_wlteh_webp_3') >= 0));
+  assert.equal(list.some(u => u.indexOf('!nd_prv_wlteh_webp_3') >= 0), false);
+  assert.ok(list.length <= 6);
+});
+
+test('coverUrlCandidates falls back to the webpic chain for non-CDN urls', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  // Not a signed /{ts}/{token}/ cover url, so there is no ci object to probe.
   const rendered = 'https://sns-webpic-qc.xhscdn.com/20240101/demo/note.jpg!nd_dft_wlteh_webp_3';
   const list = api.coverUrlCandidates(rendered);
+  assert.equal(api.toCdnObjectPath(rendered), '');
+  assert.equal(list.some(u => u.indexOf('ci.xiaohongshu.com') >= 0), false);
   assert.equal(list[0], 'https://sns-webpic-qc.xhscdn.com/20240101/demo/note.jpg');
-  assert.equal(list[0].indexOf('!nd_'), -1, 'master url must stay free of processing suffixes');
-  // The rendered url and the webp derivative are both kept as fallbacks.
-  assert.ok(list.indexOf(rendered) >= 1);
+  assert.equal(list.indexOf(rendered) >= 1, true);
   assert.ok(list.slice(1).some(u => u.indexOf('!nd_dft_wlteh_webp_3') >= 0));
-  assert.equal(api.buildCoverFileName('n1', list[0], 'image/jpeg'), 'xhs-note-n1.jpg');
+});
+
+test('isForcedJpegCandidate only matches the server-side jpeg transcode', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  assert.equal(api.isForcedJpegCandidate('https://ci.xiaohongshu.com/notes_pre_post/abc?imageView2/format/jpeg'), true);
+  assert.equal(api.isForcedJpegCandidate('https://ci.xiaohongshu.com/notes_pre_post/abc?imageView2/format/jpg'), true);
+  assert.equal(api.isForcedJpegCandidate('https://ci.xiaohongshu.com/notes_pre_post/abc'), false);
+  assert.equal(api.isForcedJpegCandidate('https://ci.xiaohongshu.com/notes_pre_post/abc!nd_dft_wlteh_webp_3'), false);
+  assert.equal(api.isForcedJpegCandidate(''), false);
+  assert.equal(api.isForcedJpegCandidate(null), false);
+});
+
+test('sniffImageMimeFromBytes identifies masters that carry no file extension', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const bytes = arr => api.sniffImageMimeFromBytes(new Uint8Array(arr));
+  assert.equal(bytes([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]), 'image/jpeg');
+  assert.equal(bytes([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), 'image/png');
+  assert.equal(bytes([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]), 'image/gif');
+  assert.equal(
+    bytes([0x52, 0x49, 0x46, 0x46, 0x20, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]),
+    'image/webp'
+  );
+  assert.equal(
+    bytes([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63]),
+    'image/heic'
+  );
+  assert.equal(bytes([0, 0, 0, 0]), '');
+  assert.equal(api.sniffImageMimeFromBytes(new Uint8Array([])), '');
+  // A bare RIFF prefix is not enough to claim webp; the payload tag is at offset 8.
+  assert.equal(bytes([0x52, 0x49, 0x46, 0x46, 0x20, 0x00, 0x00, 0x00]), '');
+  assert.equal(api.looksLikeImageBytes(new Uint8Array([0xff, 0xd8, 0xff, 0xe0])), true);
+  assert.equal(api.looksLikeImageBytes(new Uint8Array([0x00, 0x01, 0x02, 0x03])), false);
+});
+
+test('resolveCoverBlobFromCandidates stops at the first jpeg instead of draining the chain', async () => {
+  // url suffix -> mime the CDN answers with, so a master can be made webp/heic/png.
+  const MIME_BY_MARK = { plain: 'image/jpeg', webpmaster: 'image/webp', heicmaster: 'image/heic' };
+  function harness() {
+    const calls = [];
+    const BlobCtorRef = {};
+    const extras = {
+      GM_xmlhttpRequest(opts) {
+        calls.push(opts.url);
+        // Model the real host: '?imageView2/format/jpeg' always answers jpeg, whatever
+        // the master is stored as.
+        const forcedJpeg = /[?&]imageView2\/format\/jpe?g(?:$|[/?&])/i.test(opts.url);
+        const mark = (opts.url.match(/mark-([a-z]+)/) || [])[1] || 'plain';
+        const mime = forcedJpeg ? 'image/jpeg' : (MIME_BY_MARK[mark] || 'image/jpeg');
+        const body = new Uint8Array(64).fill(mark.charCodeAt(0));
+        opts.onload({ status: 200, response: new BlobCtorRef.ctor([body], { type: mime }) });
+      }
+    };
+    const ctx = load('/search_result', true, undefined, extras);
+    BlobCtorRef.ctor = ctx.Blob;
+    return { api: ctx.__XHS_ENHANCED_TEST_API__, calls };
+  }
+
+  const KEY = 'notes_pre_post/1040g3k031qtmfr5pno004a62p2ihj0itmhtlqk0';
+  const CI = 'https://ci.xiaohongshu.com/';
+  // Shaped like coverUrlCandidates() output: master, then the forced-jpeg re-encode.
+  const chainFor = masterMark => [
+    CI + 'mark-' + masterMark + '/' + KEY,
+    CI + 'mark-' + masterMark + '/' + KEY + '?imageView2/format/jpeg'
+  ];
+
+  // 1. Master is already jpeg: exactly one request, no re-encode, no mirror probe.
+  let h = harness();
+  let chain = chainFor('plain');
+  let hit = await h.api.resolveCoverBlobFromCandidates(chain);
+  assert.equal(hit.blob.type, 'image/jpeg');
+  assert.equal(h.calls.length, 1, 'jpeg master must short-circuit, got: ' + JSON.stringify(h.calls));
+  assert.equal(h.calls[0], chain[0]);
+
+  // 2. Master is webp: must fall through to the forced-jpeg candidate and take it.
+  h = harness();
+  chain = chainFor('webpmaster');
+  hit = await h.api.resolveCoverBlobFromCandidates(chain);
+  assert.equal(h.calls.length, 2, 'webp master must be retried as jpeg, got: ' + JSON.stringify(h.calls));
+  assert.ok(h.calls[1].indexOf('?imageView2/format/jpeg') >= 0);
+  assert.equal(hit.blob.type, 'image/jpeg');
+
+  // 3. Every candidate is a non-jpeg master: keep the first success as the best-so-far
+  //    rather than losing it, and never exceed the candidate count.
+  h = harness();
+  const allWebp = [CI + 'mark-webpmaster/a', CI + 'mark-heicmaster/b', CI + 'mark-webpmaster/c'];
+  hit = await h.api.resolveCoverBlobFromCandidates(allWebp);
+  assert.equal(h.calls.length, 3);
+  assert.equal(hit.url, allWebp[0], 'first non-jpeg success must be preserved');
+  assert.equal(hit.blob.type, 'image/webp');
+});
+
+test('isJpegBlob and buildCoverFileName never mislabel a heic master as jpg', () => {
+  const api = load('/search_result').__XHS_ENHANCED_TEST_API__;
+  assert.equal(api.isJpegBlob({ type: 'image/jpeg' }), true);
+  assert.equal(api.isJpegBlob({ type: 'image/jpg' }), true);
+  assert.equal(api.isJpegBlob({ type: 'image/webp' }), false);
+  assert.equal(api.isJpegBlob({ type: 'image/heic' }), false);
+  assert.equal(api.isJpegBlob(null), false);
+  assert.equal(api.buildCoverFileName('n1', 'https://ci.xiaohongshu.com/note_pre_post_uhdr/abc', 'image/heic'), 'xhs-note-n1.heic');
+  assert.equal(api.buildCoverFileName('n1', 'https://ci.xiaohongshu.com/notes_pre_post/abc', 'image/jpeg'), 'xhs-note-n1.jpg');
 });
 
 

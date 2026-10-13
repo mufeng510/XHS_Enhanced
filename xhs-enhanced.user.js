@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小红书网页版增强
 // @namespace    https://github.com/mufeng510/XHS_Enhanced
-// @version      1.8.0
+// @version      1.9.0
 // @description  可配置热门阈值，高亮点赞数超过该阈值的笔记并支持上/下一条热门笔记快速跳转；"只显示热门"开关模糊虚化非热门笔记（保留占位）；笔记卡片支持复制链接（explore 格式含 xsec_token）与无水印封面；一键把笔记链接发送到自建 XHS_ALL_IN_ONE 内容库保存
 // @match        https://www.xiaohongshu.com/search_result*
 // @match        https://www.xiaohongshu.com/user/profile/*
@@ -673,6 +673,30 @@
     return '';
   }
 
+  // The sns-webpic host only ever hands out CDN-processed derivatives; the master
+  // object lives on ci.xiaohongshu.com under the same object key. Drop the
+  // /{12-digit timestamp}/{32-hex token}/ signed prefix and keep the remainder --
+  // the scene segment (notes_pre_post, note_pre_post_uhdr, spectrum, or nothing) is
+  // part of the key, so probing ci with the bare trace id 404s.
+  function toCdnObjectPath(input) {
+    const raw = normalizeSpace(input);
+    if (!raw || /^(?:data:|blob:)/i.test(raw)) return '';
+    let path = '';
+    try {
+      const base = (PAGE.location && PAGE.location.href) || 'https://www.xiaohongshu.com/';
+      path = new URL(raw, base).pathname;
+    } catch (_) {
+      path = raw.split('#')[0].split('?')[0];
+    }
+    path = String(path).replace(/!.*$/, '').replace(/^\/+/, '');
+    if (!path) return '';
+    const signed = path.match(/^\d{12}\/[0-9a-f]+\/(.+)$/i);
+    const body = signed ? signed[1] : path;
+    const traceId = body.split('/').pop();
+    // Guard against avatars and other non-note assets that never reach this path.
+    return /^[0-9a-z_]{8,}$/i.test(traceId) ? body : '';
+  }
+
   function coverUrlCandidates(raw) {
     const original = normalizeSpace(raw);
     if (!original) return [];
@@ -684,15 +708,29 @@
       if (!text || out.indexOf(text) >= 0) return;
       out.push(text);
     };
-    // De-processed original object first: it is the untouched master (no watermark,
-    // no rescale, no second encode), so downloads land on the stored JPEG instead of
-    // the '!nd_*_webp_*' derivative the card happens to render.
+    const objectPath = toCdnObjectPath(original);
+    if (objectPath) {
+      // Master object first, with no '!suffix': the suffix is a forced format
+      // instruction that also applies on ci, so '!nd_dft_wlteh_webp_3' would hand
+      // back a webp transcode even from the otherwise untouched object.
+      push('https://ci.xiaohongshu.com/' + objectPath);
+      // Masters are stored as jpeg, webp or heic depending on what the uploader
+      // sent, so the first hit is not guaranteed to be jpeg. This server-side
+      // transcode is the reliable fallback -- Chromium cannot decode heic, so a
+      // local canvas pass would fail on exactly these.
+      push('https://ci.xiaohongshu.com/' + objectPath + '?imageView2/format/jpeg');
+      push('https://sns-img-hw.xhscdn.com/' + objectPath);
+    }
     push(normalized);
     push(original);
     if (normalized && !/!/.test(normalized.split("?")[0])) {
       push(normalized.replace(/([?].*)?$/, "!nd_dft_wlteh_webp_3$1"));
     }
-    return out.slice(0, 3);
+    return out.slice(0, 6);
+  }
+
+  function isForcedJpegCandidate(url) {
+    return /[?&]imageView2\/format\/jpe?g(?:$|[/?&])/i.test(String(url || ''));
   }
 
   function coverRequestHeaders() {
@@ -716,6 +754,7 @@
     if (mime === 'image/png') return 'png';
     if (mime === 'image/webp') return 'webp';
     if (mime === 'image/avif') return 'avif';
+    if (mime === 'image/heic' || mime === 'image/heif') return 'heic';
     if (mime === 'image/gif') return 'gif';
     return '';
   }
@@ -730,7 +769,7 @@
     }
     // XHS processed variants append '!nd_*' after the real extension.
     path = String(path).replace(/!.*$/, '');
-    const match = path.match(/\.(jpe?g|png|webp|avif|gif)$/i);
+    const match = path.match(/\.(jpe?g|png|webp|avif|heic|heif|gif)$/i);
     if (!match) return '';
     const ext = match[1].toLowerCase();
     return ext === 'jpe' || ext === 'jpeg' ? 'jpg' : ext;
@@ -893,7 +932,8 @@
     }
   }
 
-  function canvasToPngBlob(img) {
+  function canvasToBlob(img, mimeType, quality) {
+    const type = mimeType || "image/png";
     try {
       const canvas = ROOT.document.createElement("canvas");
       if (!canvas || typeof canvas.getContext !== "function") return Promise.resolve(null);
@@ -901,29 +941,54 @@
       canvas.height = img.naturalHeight || img.height || 0;
       if (!canvas.width || !canvas.height) return Promise.resolve(null);
       const ctx = canvas.getContext("2d");
+      // JPEG has no alpha channel; without this the flattened alpha turns black.
+      if (type === "image/jpeg" || type === "image/jpg") {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
       ctx.drawImage(img, 0, 0);
-      const BlobCtor = getPageBlobCtor() || ROOT.Blob;
+      const viaDataUrl = () => {
+        try { return dataUrlToBlob(canvas.toDataURL(type, quality), type); }
+        catch (_) { return null; }
+      };
       if (typeof canvas.toBlob === "function") {
         return new Promise(resolve => {
           try {
             canvas.toBlob(blob => {
-              if (!blob) {
-                try { resolve(dataUrlToBlob(canvas.toDataURL("image/png"), "image/png")); }
-                catch (_) { resolve(null); }
-                return;
-              }
+              if (!blob) { resolve(viaDataUrl()); return; }
               transferBlobToPage(blob).then(resolve, () => resolve(blob));
-            }, "image/png");
+            }, type, quality);
           } catch (_) {
-            try { resolve(dataUrlToBlob(canvas.toDataURL("image/png"), "image/png")); }
-            catch (e2) { resolve(null); }
+            resolve(viaDataUrl());
           }
         });
       }
-      return Promise.resolve(dataUrlToBlob(canvas.toDataURL("image/png"), "image/png"));
+      return Promise.resolve(viaDataUrl());
     } catch (_) {
       return Promise.resolve(null);
     }
+  }
+
+  function canvasToPngBlob(img) {
+    return canvasToBlob(img, "image/png");
+  }
+
+  function isJpegBlob(blob) {
+    const type = normalizeSpace(blob && blob.type).toLowerCase();
+    return type === "image/jpeg" || type === "image/jpg";
+  }
+
+  // Last-resort local re-encode for masters the CDN stored as webp/avif. Returns null
+  // when the platform cannot decode the source -- notably heic, which Chromium refuses
+  // to decode -- so the caller can keep the original bytes instead of failing.
+  function blobToJpegBlob(blob, quality) {
+    if (!blob || isJpegBlob(blob)) return Promise.resolve(null);
+    if (typeof ROOT.createImageBitmap !== "function") return Promise.resolve(null);
+    const q = typeof quality === "number" ? quality : 0.92;
+    return ROOT.createImageBitmap(blob).then(bitmap => canvasToBlob(bitmap, "image/jpeg", q).then(out => {
+      try { bitmap.close(); } catch (_) {}
+      return out || null;
+    }), () => null);
   }
 
   function blobToPngBlob(blob) {
@@ -991,13 +1056,20 @@
     return "image/jpeg";
   }
 
+  function sniffImageMimeFromBytes(bytes) {
+    if (!bytes || bytes.length < 4) return '';
+    if (bytes[0] === 0xff && bytes[1] === 0xd8) return "image/jpeg";
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return "image/gif";
+    // RIFF....WEBP -- the payload sits at offset 8, so length 12 is the floor.
+    if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+      && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return "image/webp";
+    if (bytes.length >= 12 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) return "image/heic";
+    return '';
+  }
+
   function looksLikeImageBytes(bytes) {
-    if (!bytes || bytes.length < 4) return false;
-    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return true;
-    if (bytes[0] === 0xff && bytes[1] === 0xd8) return true;
-    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return true;
-    if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) return true;
-    return false;
+    return sniffImageMimeFromBytes(bytes) !== '';
   }
 
   function normalizeFetchedImageBlob(blob, url) {
@@ -1236,7 +1308,10 @@
           const view = buf instanceof ROOT.ArrayBuffer ? new ROOT.Uint8Array(buf) : new ROOT.Uint8Array(buf.buffer || buf);
           if (view.byteLength < 32 || !looksLikeImageBytes(view)) { cacheCoverMiss(url); return null; }
           const BlobCtor = getPageBlobCtor() || ROOT.Blob;
-          const blob = new BlobCtor([view], { type: guessImageMimeFromUrl(url) });
+          // Sniff the bytes: the ci object urls carry no extension, so guessing from
+          // the url would label a webp or heic master as jpeg.
+          const sniffed = sniffImageMimeFromBytes(view) || guessImageMimeFromUrl(url);
+          const blob = new BlobCtor([view], { type: sniffed });
           cacheCoverBlob(url, blob);
           return blob;
         } catch (_) { cacheCoverMiss(url); return null; }
@@ -1244,13 +1319,22 @@
     });
   }
 
+  // Candidates are tried in priority order and the walk stops as soon as the bytes in
+  // hand are jpeg -- that is the whole point of the chain, so continuing would only
+  // re-download multi-MB masters for nothing. Below jpeg we keep the first success as
+  // the best-so-far and keep looking, because a master that came back as webp/heic/png
+  // must not beat the forced-jpeg candidate, and a failed candidate must not discard it.
   function resolveCoverBlobFromCandidates(candidates) {
     let chain = Promise.resolve(null);
     for (const url of candidates) {
       chain = chain.then(prev => {
-        if (prev) return prev;
-        if (/^(?:data:|blob:)/i.test(url)) return fetchCoverBlob(url);
-        return gmFetchCoverBlob(url);
+        if (prev && (isJpegBlob(prev.blob) || isForcedJpegCandidate(prev.url))) return prev;
+        const loader = /^(?:data:|blob:)/i.test(url) ? fetchCoverBlob(url) : gmFetchCoverBlob(url);
+        return loader.then(blob => {
+          if (!blob) return prev;
+          if (isForcedJpegCandidate(url) || isJpegBlob(blob)) return { url: url, blob: blob };
+          return prev || { url: url, blob: blob };
+        }, () => prev);
       });
     }
     return chain;
@@ -1258,7 +1342,7 @@
 
   function loadCoverPngBlob(src) {
     return resolveCoverBlobFromCandidates(coverUrlCandidates(src))
-      .then(blob => (blob ? { ok: true, blob, mimeType: blob.type || "image/png" } : { ok: false }));
+      .then(hit => (hit && hit.blob ? { ok: true, blob: hit.blob, url: hit.url || '' } : { ok: false }));
   }
 
   function onCopyLink(card) {
@@ -1286,6 +1370,15 @@
     });
   }
 
+  // The master object is whatever the uploader sent: jpeg, webp or heic. Re-encode
+  // locally when the CDN handed back something that is not already jpeg; if the
+  // platform cannot decode it (heic on Chromium) keep the original bytes rather than
+  // fail the download.
+  function ensureJpegCoverBlob(blob) {
+    if (!blob || isJpegBlob(blob)) return Promise.resolve(blob);
+    return blobToJpegBlob(blob).then(jpeg => jpeg || blob);
+  }
+
   function onDownloadCover(card) {
     if (downloadCoverInFlight) return;
     const src = extractCoverUrl(card);
@@ -1296,6 +1389,7 @@
       return result.blob;
     });
     blobPromise
+      .then(blob => ensureJpegCoverBlob(blob))
       .then(blob => transferBlobToPage(blob))
       .then(pageBlob => {
         downloadCoverInFlight = false;
@@ -2339,6 +2433,7 @@
     parseLikeCount, parseThreshold, readStoredThreshold, readStoredFocusPopular, isTargetRoute, isProfileRoute, isDetailRoute, getCurrentRoute, signatureFor, selectNextPopularCard, selectPreviousPopularCard,
     getNoteIdFromHref, buildShareLink, getXsecTokenFromHref, parseQueryValue, extractTokensFromState, findTokenForNoteIdInState, getFallbackTokenForNoteId, clearFallbackTokenCache,
     toNoWatermarkCoverUrl, extractCoverUrl, dataUrlToBlob, coverUrlCandidates, coverRequestHeaders, pickLargestFromSrcset, buildCoverFileName,
+    toCdnObjectPath, isForcedJpegCandidate, sniffImageMimeFromBytes, looksLikeImageBytes, isJpegBlob, resolveCoverBlobFromCandidates,
     parseBaseUrl, readLibraryConfig, parseTokenExp, buildCrawlPayload, buildDetailNoteUrl, resolveSaveUrlFromCard, cardNoteTargetId, resolveCardNoteLink,
     READ_ATTRIBUTES, SELECTORS
   });
