@@ -6,7 +6,7 @@
 
 ### `storage`
 保存扩展自身的本地数据：内容库（XHS_ALL_IN_ONE）连接配置（服务器地址、用户名、账号 ID、密码、refresh token）。全部写入 `chrome.storage.local`，仅存于用户本机，不与 Google/Microsoft 账号同步，网页脚本无法读取。
-（注：笔记“热门阈值”和“只显示热门”开关与油猴版本一致，保存在小红书页面的 localStorage 中，便于沿用老用户设置；不含任何账号或凭据。）
+（注：笔记“热门阈值”和“只显示热门”开关与油猴版本一致，旧版 localStorage 键会自动迁移到扩展本地存储；不含任何账号或凭据。）
 
 ### `declarativeNetRequestWithHostAccess`
 为发往小红书图片 CDN（`*.xhscdn.com`、`ci.xiaohongshu.com`）的请求设置 `Referer: https://www.xiaohongshu.com/`。小红书 CDN 会对无 Referer 的请求拒绝出图；扩展后台服务无法可靠地通过 fetch 设置 Referer，因此使用声明式规则。

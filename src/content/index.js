@@ -5,11 +5,8 @@
 import { getRoot, isTestMode } from '../lib/env.js';
 import { normalizeSpace } from '../lib/text.js';
 import {
-  DEFAULT_THRESHOLD,
-  THRESHOLD_STORAGE_KEY,
-  FOCUS_STORAGE_KEY,
-  parseThreshold,
   parseLikeCount,
+  parseThreshold,
   isTargetRoute,
   isProfileRoute,
   isDetailRoute,
@@ -37,7 +34,11 @@ import {
   ready,
   readStoredThreshold,
   readStoredFocusPopular,
-  readLibraryConfig
+  writeStoredFocusPopular,
+  writeStoredThreshold,
+  readLibraryConfig,
+  THRESHOLD_KEY,
+  FOCUS_KEY
 } from '../lib/settings.js';
 import { hasPrivilegedChannel } from '../lib/remote.js';
 import {
@@ -66,9 +67,6 @@ const JUMP_NAV_ID = 'xhs-enhanced-jump-nav';
 const JUMP_BUTTON_ID = 'xhs-enhanced-jump-next';
 const JUMP_PREV_BUTTON_ID = 'xhs-enhanced-jump-prev';
 const JUMP_STATUS_ID = 'xhs-enhanced-jump-status';
-const THRESHOLD_CONTROL_ID = 'xhs-enhanced-threshold-control';
-const THRESHOLD_INPUT_ID = 'xhs-enhanced-threshold-input';
-const THRESHOLD_STATUS_ID = 'xhs-enhanced-threshold-status';
 const JUMP_BUTTON_TEXT = '下一条热门笔记';
 const JUMP_PREV_BUTTON_TEXT = '上一条热门笔记';
 const LAST_NOTE_TEXT = '已经是最后一条热门笔记';
@@ -102,8 +100,8 @@ const LIBRARY_PAGE_BUTTON_TEXT = '保存到内容库';
 const LIBRARY_BATCH_BUTTON_ID = 'xhs-enhanced-library-batch';
 const LIBRARY_BATCH_BUTTON_TEXT = '本页全部入库';
 const LIBRARY_BATCH_EMPTY_TEXT = '本页没有可入库的笔记链接';
-const LIBRARY_TOGGLE_ID = 'xhs-enhanced-library-toggle';
-const LIBRARY_TOGGLE_TEXT = '内容库设置';
+const SETTINGS_BUTTON_ID = 'xhs-enhanced-settings';
+const SETTINGS_BUTTON_TEXT = '⚙ 设置';
 const LIBRARY_SAVED_OK = '已保存到内容库';
 const LIBRARY_SAVE_FAIL = '内容库保存失败';
 const LIBRARY_NO_TOKEN = '未获取到 xsec_token，无法采集';
@@ -137,19 +135,13 @@ let jumpNav = null;
 let jumpButton = null;
 let jumpPrevButton = null;
 let jumpStatus = null;
-let thresholdControl = null;
-let thresholdInput = null;
-let thresholdStatus = null;
-let threshold = DEFAULT_THRESHOLD;
 let jumpStatusTimer = null;
-let focusPopular = false;
 let focusToggle = null;
 let copyStatus = null;
 let copyStatusTimer = null;
 let copyCoverInFlight = false;
 let downloadCoverInFlight = false;
 let saveInFlight = false;
-let libraryToggle = null;
 let libraryPageButton = null;
 let libraryBatchButton = null;
 let fallbackTokenResolver = null;
@@ -176,54 +168,11 @@ function clearFallbackTokenCache() {
   if (fallbackTokenResolver) fallbackTokenResolver.clearFallbackTokenCache();
 }
 
-function getStorage() {
-  try {
-    return ROOT.localStorage || null;
-  } catch (_) {
-    return null;
-  }
-}
-
-function setThreshold(value, storage = getStorage()) {
-  const parsed = parseThreshold(value);
-  if (!parsed.ok) return { ok: false, value: threshold, persisted: false };
-  threshold = parsed.value;
-  let persisted = false;
-  if (storage) {
-    try {
-      storage.setItem(THRESHOLD_STORAGE_KEY, String(threshold));
-      persisted = true;
-    } catch (_) {
-      // A valid setting still applies for this page when storage is unavailable.
-    }
-  }
-  return { ok: true, value: threshold, persisted };
-}
-
-function setFocusPopular(value, storage = getStorage()) {
-  focusPopular = Boolean(value);
-  let persisted = false;
-  if (storage) {
-    try {
-      storage.setItem(FOCUS_STORAGE_KEY, focusPopular ? '1' : '0');
-      persisted = true;
-    } catch (_) {
-      // The toggle still applies for this page when browser storage is unavailable.
-    }
-  }
-  return persisted;
-}
-
-function applyFocusToggleState() {
-  if (focusToggle) focusToggle.setAttribute('aria-pressed', focusPopular ? 'true' : 'false');
-}
-
 function onFocusToggleClick() {
-  const persisted = setFocusPopular(!focusPopular);
-  applyFocusToggleState();
-  showCopyStatus(focusPopular
-    ? (persisted ? '已开启：只显示热门笔记' : '已开启：只显示热门笔记（设置未能保存）')
-    : '已关闭：显示全部笔记');
+  const enabled = !readStoredFocusPopular();
+  const { persisted } = writeStoredFocusPopular(enabled);
+  if (focusToggle) focusToggle.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+  showCopyStatus((enabled ? '已开启：只显示热门笔记' : '已关闭：显示全部笔记') + (persisted ? '' : '（设置未能保存）'));
   scan(ROOT.document);
 }
 
@@ -418,6 +367,35 @@ function onFocusToggleClick() {
     } catch (_) {}
     showCopyStatus('请在扩展详情页打开"选项"配置内容库');
     return false;
+  }
+
+  // Re-render immediately when the options page (or another open tab) writes
+  // the shared preference keys — no waiting for the next mutation/scan cycle.
+  function subscribePreferenceChanges() {
+    const chromeObj = ROOT.chrome;
+    try {
+      const store = chromeObj && chromeObj.storage;
+      const onChanged = store && store.onChanged;
+      if (!onChanged || typeof onChanged.addListener !== 'function') return;
+      preferenceChangeHandler = (changes, areaName) => {
+        if (areaName !== 'local' || !changes) return;
+        if (!Object.prototype.hasOwnProperty.call(changes, THRESHOLD_KEY)
+          && !Object.prototype.hasOwnProperty.call(changes, FOCUS_KEY)) return;
+        scan(ROOT.document);
+      };
+      onChanged.addListener(preferenceChangeHandler);
+    } catch (_) {}
+  }
+
+  function unsubscribePreferenceChanges() {
+    const chromeObj = ROOT.chrome;
+    try {
+      const onChanged = chromeObj && chromeObj.storage && chromeObj.storage.onChanged;
+      if (onChanged && typeof onChanged.removeListener === 'function' && preferenceChangeHandler) {
+        onChanged.removeListener(preferenceChangeHandler);
+      }
+    } catch (_) {}
+    preferenceChangeHandler = null;
   }
 
   function submitNoteUrlsToLibrary(urls, options) {
@@ -643,32 +621,28 @@ function onFocusToggleClick() {
     style.textContent = `
       .${CARD_CLASS}{outline:2px solid #ff2442!important;background:rgba(255,36,66,.07)!important;box-shadow:0 2px 10px rgba(255,36,66,.14)!important}
       .${LIKE_CLASS}{color:#ff2442!important;font-weight:700!important}
-      #${JUMP_NAV_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;display:flex;gap:8px}
-      #${JUMP_PREV_BUTTON_ID},#${JUMP_BUTTON_ID}{border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
+      #${JUMP_NAV_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;display:flex;gap:8px;align-items:center}
+      #${JUMP_PREV_BUTTON_ID},#${JUMP_BUTTON_ID},#${FOCUS_TOGGLE_ID}{border:0;border-radius:999px;padding:9px 15px;font:600 13px/1.4 system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.22);cursor:pointer;transition:background .15s ease,color .15s ease,opacity .15s ease}
+      #${JUMP_PREV_BUTTON_ID},#${JUMP_BUTTON_ID}{background:#ff2442;color:#fff}
       #${JUMP_PREV_BUTTON_ID}:hover,#${JUMP_BUTTON_ID}:hover{background:#e61e3c}
-      #${JUMP_PREV_BUTTON_ID}:focus-visible,#${JUMP_BUTTON_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
-      #${FOCUS_TOGGLE_ID}{border:0;border-radius:999px;padding:10px 16px;background:rgba(30,30,30,.9);color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
-      #${FOCUS_TOGGLE_ID}:hover{background:rgba(15,15,15,1)}
-      #${FOCUS_TOGGLE_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
-      #${FOCUS_TOGGLE_ID}[aria-pressed="true"]{background:#ff2442}
-      #${FOCUS_TOGGLE_ID}[aria-pressed="true"]:hover{background:#e61e3c}
+      #${JUMP_PREV_BUTTON_ID}:focus-visible,#${JUMP_BUTTON_ID}:focus-visible,#${FOCUS_TOGGLE_ID}:focus-visible,#${LIBRARY_PAGE_BUTTON_ID}:focus-visible,#${LIBRARY_BATCH_BUTTON_ID}:focus-visible,#${SETTINGS_BUTTON_ID}:focus-visible{outline:2px solid #fff;outline-offset:2px}
+      #${FOCUS_TOGGLE_ID}{background:rgba(30,30,30,.88);color:#fff}
+      #${FOCUS_TOGGLE_ID}:hover{background:rgba(15,15,15,.98)}
+      #${FOCUS_TOGGLE_ID}[aria-pressed="true"]{background:#ff2442;color:#fff}
       .${DIMMED_CLASS}{filter:blur(8px) grayscale(.35);opacity:.55;transition:filter .18s ease,opacity .18s ease}
       .${DIMMED_CLASS}:hover{filter:none;opacity:1}
-      #${THRESHOLD_CONTROL_ID}{position:fixed;top:138px;right:24px;z-index:2147483646;display:flex;gap:6px;align-items:center;padding:8px;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.16);font:14px/1.4 system-ui,sans-serif}
-      #${THRESHOLD_INPUT_ID}{width:72px;border:1px solid #aaa;border-radius:4px;padding:5px 6px;font:inherit}#${THRESHOLD_CONTROL_ID} button{border:0;border-radius:4px;padding:6px 9px;background:#ff2442;color:#fff;font:600 13px/1 system-ui,sans-serif;cursor:pointer}
-      #${THRESHOLD_STATUS_ID}{position:fixed;top:190px;right:24px;z-index:2147483646;max-width:260px;padding:7px 10px;border-radius:6px;background:rgba(30,30,30,.92);color:#fff;font:13px/1.4 system-ui,sans-serif;pointer-events:none}
-      #${JUMP_STATUS_ID}{position:fixed;top:228px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
-      #${COPY_STATUS_ID}{position:fixed;top:276px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
-      #${LIBRARY_PAGE_BUTTON_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
-      #${LIBRARY_PAGE_BUTTON_ID}:hover{background:#e61e3c}#${LIBRARY_PAGE_BUTTON_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
-      #${LIBRARY_BATCH_BUTTON_ID}{position:fixed;top:316px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 13px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
-      #${LIBRARY_BATCH_BUTTON_ID}:hover{background:#e61e3c}#${LIBRARY_BATCH_BUTTON_ID}:disabled{opacity:.6;cursor:default}
-      #${LIBRARY_TOGGLE_ID}{position:fixed;bottom:24px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:rgba(30,30,30,.9);color:#fff;font:600 13px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
-      #${LIBRARY_TOGGLE_ID}:hover{background:rgba(15,15,15,1)}
+      #${JUMP_STATUS_ID}{position:fixed;top:136px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:13px/1.5 system-ui,sans-serif;pointer-events:none}
+      #${COPY_STATUS_ID}{position:fixed;top:182px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:13px/1.5 system-ui,sans-serif;pointer-events:none}
+      #${LIBRARY_PAGE_BUTTON_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 18px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.25);cursor:pointer}
+      #${LIBRARY_PAGE_BUTTON_ID}:hover{background:#e61e3c}
+      #${LIBRARY_BATCH_BUTTON_ID}{position:fixed;top:316px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 18px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.25);cursor:pointer}
+      #${LIBRARY_BATCH_BUTTON_ID}:hover{background:#e61e3c}#${LIBRARY_BATCH_BUTTON_ID}:disabled{opacity:.55;cursor:default}
+      #${SETTINGS_BUTTON_ID}{position:fixed;bottom:24px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:9px 16px;background:rgba(30,30,30,.88);color:#fff;font:600 13px/1.4 system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.2);cursor:pointer}
+      #${SETTINGS_BUTTON_ID}:hover{background:rgba(15,15,15,.98)}
       .${CARD_ACTIONS_CLASS}{position:absolute;top:6px;left:6px;z-index:2147483640;display:flex;gap:4px;opacity:0;transition:opacity .15s ease;pointer-events:none}
       .xhs-enhanced-card--popular .${CARD_ACTIONS_CLASS},.note-item:hover .${CARD_ACTIONS_CLASS},section.note-item:hover .${CARD_ACTIONS_CLASS},article.note-item:hover .${CARD_ACTIONS_CLASS}{opacity:1;pointer-events:auto}
       [data-note-card],article.note-item,section.note-item,.note-item{position:relative}
-      .${CARD_ACTIONS_CLASS} button{border:0;border-radius:6px;padding:5px 9px;background:rgba(255,36,66,.92);color:#fff;font:600 12px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.18)}
+      .${CARD_ACTIONS_CLASS} button{border:0;border-radius:6px;padding:5px 8px;background:rgba(255,36,66,.92);color:#fff;font:600 11px/1.35 system-ui,sans-serif;white-space:nowrap;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.18)}
       .${CARD_ACTIONS_CLASS} button:hover{background:#e61e3c}
       .${COPY_COVER_CLASS}{background:rgba(30,30,30,.82)!important}
       .${DOWNLOAD_COVER_CLASS}{background:rgba(37,99,235,.92)!important}
@@ -682,10 +656,10 @@ function onFocusToggleClick() {
     const like = extractLike(card);
     const route = getCurrentRoute();
     const signature = signatureFor(route, like ? like.raw : '');
-    const popular = Boolean(like && like.parsed.value > threshold);
+    const popular = Boolean(like && like.parsed.value > readStoredThreshold());
 
     card.classList.toggle(CARD_CLASS, popular);
-    card.classList.toggle(DIMMED_CLASS, focusPopular && !popular);
+    card.classList.toggle(DIMMED_CLASS, readStoredFocusPopular() && !popular);
     for (const stale of card.querySelectorAll(`.${LIKE_CLASS}`)) if (!like || stale !== like.node) stale.classList.remove(LIKE_CLASS);
     if (like) like.node.classList.toggle(LIKE_CLASS, popular);
 
@@ -828,7 +802,7 @@ function onFocusToggleClick() {
       toggle.type = 'button';
       toggle.textContent = FOCUS_TOGGLE_TEXT;
       toggle.setAttribute('aria-label', FOCUS_TOGGLE_TEXT);
-      toggle.setAttribute('aria-pressed', focusPopular ? 'true' : 'false');
+      toggle.setAttribute('aria-pressed', readStoredFocusPopular() ? 'true' : 'false');
       toggle.addEventListener('click', onFocusToggleClick);
     }
     focusToggle = toggle;
@@ -837,78 +811,6 @@ function onFocusToggleClick() {
     if (prev.parentElement !== nav) nav.appendChild(prev);
     if (button.parentElement !== nav) nav.appendChild(button);
     if (toggle.parentElement !== nav) nav.appendChild(toggle);
-  }
-
-  function showThresholdStatus(message) {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let node = thresholdStatus && thresholdStatus.isConnected ? thresholdStatus : ROOT.document.getElementById(THRESHOLD_STATUS_ID);
-    if (!node) {
-      node = ROOT.document.createElement('div');
-      node.id = THRESHOLD_STATUS_ID;
-      node.setAttribute('role', 'status');
-      node.setAttribute('aria-live', 'polite');
-      ROOT.document.body.appendChild(node);
-    }
-    node.textContent = message;
-    thresholdStatus = node;
-  }
-
-  function applyThresholdInput() {
-    if (!thresholdInput) return;
-    const result = setThreshold(thresholdInput.value);
-    thresholdInput.value = String(threshold);
-    if (!result.ok) {
-      showThresholdStatus(`请输入非负整数，当前阈值为 ${threshold}`);
-      return;
-    }
-    showThresholdStatus(result.persisted ? `热门阈值已设为 ${threshold}` : `热门阈值已设为 ${threshold}，但未能保存`);
-    scan(ROOT.document);
-  }
-
-  function ensureThresholdUi() {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let control = thresholdControl && thresholdControl.isConnected ? thresholdControl : ROOT.document.getElementById(THRESHOLD_CONTROL_ID);
-    let created = false;
-    if (!control) {
-      created = true;
-      control = ROOT.document.createElement('div');
-      control.id = THRESHOLD_CONTROL_ID;
-      control.setAttribute('role', 'group');
-      control.setAttribute('aria-label', '热门阈值设置');
-      const label = ROOT.document.createElement('label');
-      label.htmlFor = THRESHOLD_INPUT_ID;
-      label.textContent = '热门阈值';
-      const input = ROOT.document.createElement('input');
-      input.id = THRESHOLD_INPUT_ID;
-      input.type = 'text';
-      input.inputMode = 'numeric';
-      input.setAttribute('aria-label', '热门阈值');
-      const button = ROOT.document.createElement('button');
-      button.type = 'button';
-      button.textContent = '应用';
-      button.addEventListener('click', applyThresholdInput);
-      input.addEventListener('keydown', event => {
-        if (event.key === 'Enter') {
-          event.returnValue = false;
-          applyThresholdInput();
-        }
-      });
-      control.append(label, input, button);
-      ROOT.document.body.appendChild(control);
-    }
-    thresholdControl = control;
-    thresholdInput = control.querySelector(`#${THRESHOLD_INPUT_ID}`);
-    if (created && thresholdInput) thresholdInput.value = String(threshold);
-  }
-
-  function removeThresholdUi() {
-    const control = thresholdControl && thresholdControl.isConnected ? thresholdControl : ROOT.document && ROOT.document.getElementById(THRESHOLD_CONTROL_ID);
-    if (control) control.remove();
-    thresholdControl = null;
-    thresholdInput = null;
-    const status = thresholdStatus && thresholdStatus.isConnected ? thresholdStatus : ROOT.document && ROOT.document.getElementById(THRESHOLD_STATUS_ID);
-    if (status) status.remove();
-    thresholdStatus = null;
   }
 
   function removeJumpUi() {
@@ -926,25 +828,29 @@ function onFocusToggleClick() {
     focusToggle = null;
   }
 
-  function ensureLibraryToggle() {
+  let settingsButton = null;
+let preferenceChangeHandler = null;
+
+  function ensureSettingsButton() {
     if (!ROOT.document || !ROOT.document.body) return;
-    let button = libraryToggle && libraryToggle.isConnected ? libraryToggle : ROOT.document.getElementById(LIBRARY_TOGGLE_ID);
+    let button = settingsButton && settingsButton.isConnected ? settingsButton : ROOT.document.getElementById(SETTINGS_BUTTON_ID);
     if (!button) {
       button = ROOT.document.createElement('button');
-      button.id = LIBRARY_TOGGLE_ID;
+      button.id = SETTINGS_BUTTON_ID;
       button.type = 'button';
-      button.textContent = LIBRARY_TOGGLE_TEXT;
-      button.setAttribute('aria-label', LIBRARY_TOGGLE_TEXT);
+      button.textContent = SETTINGS_BUTTON_TEXT;
+      button.setAttribute('aria-label', '打开扩展选项页（热门阈值、内容库设置）');
+      button.setAttribute('title', '扩展选项：热门阈值 / 内容库设置');
       button.addEventListener('click', openLibrarySettings);
       ROOT.document.body.appendChild(button);
     }
-    libraryToggle = button;
+    settingsButton = button;
   }
 
-  function removeLibraryToggle() {
-    const button = libraryToggle && libraryToggle.isConnected ? libraryToggle : ROOT.document && ROOT.document.getElementById(LIBRARY_TOGGLE_ID);
+  function removeSettingsButton() {
+    const button = settingsButton && settingsButton.isConnected ? settingsButton : ROOT.document && ROOT.document.getElementById(SETTINGS_BUTTON_ID);
     if (button) button.remove();
-    libraryToggle = null;
+    settingsButton = null;
   }
 
   function ensureLibraryPageButton() {
@@ -990,7 +896,7 @@ function onFocusToggleClick() {
   }
 
   function removeLibraryUi() {
-    removeLibraryToggle();
+    removeSettingsButton();
     removeLibraryPageButton();
     removeLibraryBatchButton();
   }
@@ -1001,13 +907,13 @@ function onFocusToggleClick() {
     if (isDetailRoute(route)) {
       // Note detail views (also the nested search/profile modal URLs) get the
       // floating save button instead of the batch tools.
-      ensureLibraryToggle();
+      ensureSettingsButton();
       ensureLibraryPageButton();
       removeLibraryBatchButton();
       return;
     }
     if (isTargetRoute(route)) {
-      ensureLibraryToggle();
+      ensureSettingsButton();
       ensureLibraryBatchButton();
       removeLibraryPageButton();
       return;
@@ -1018,10 +924,8 @@ function onFocusToggleClick() {
   function syncJumpUi() {
     if (isTargetRoute(getCurrentRoute())) {
       ensureJumpUi();
-      ensureThresholdUi();
     } else {
       removeJumpUi();
-      removeThresholdUi();
     }
   }
 
@@ -1067,8 +971,17 @@ function onFocusToggleClick() {
       if (!token || !token.active || lifecycleToken !== token) return;
       flush();
     };
-    if (typeof ROOT.requestAnimationFrame === 'function') ROOT.requestAnimationFrame(run);
-    else Promise.resolve().then(run);
+    if (typeof ROOT.requestAnimationFrame === 'function') {
+      ROOT.requestAnimationFrame(run);
+      // Headless and hidden tabs may throttle or pause rAF entirely; fall back
+      // to a timer so the scan still completes there. Visible tabs keep the
+      // rAF-only path. `scheduled` and the lifecycle token make run() idempotent.
+      if (ROOT.document && ROOT.document.visibilityState === 'hidden' && typeof ROOT.setTimeout === 'function') {
+        ROOT.setTimeout(run, 150);
+      }
+    } else {
+      Promise.resolve().then(run);
+    }
   }
 
   function scan(root) {
@@ -1139,10 +1052,9 @@ function onFocusToggleClick() {
     initialized = true;
     lifecycleToken = { active: true };
     destroyed = false;
-    threshold = readStoredThreshold();
-    focusPopular = readStoredFocusPopular();
     ensureStyle();
     bindObserverRoot(selectObserverRoot());
+    subscribePreferenceChanges();
     if (ROOT.document.documentElement && typeof ROOT.MutationObserver === 'function') {
       structureObserver = new ROOT.MutationObserver(structureMutationCallback);
       structureObserver.observe(ROOT.document.documentElement, { childList: true, subtree: true });
@@ -1170,9 +1082,9 @@ function onFocusToggleClick() {
     observerRoot = null;
     if (structureObserver) structureObserver.disconnect();
     structureObserver = null;
+    unsubscribePreferenceChanges();
     for (const [target, type, handler] of eventBindings.splice(0)) target.removeEventListener(type, handler);
     removeJumpUi();
-    removeThresholdUi();
     removeLibraryUi();
     saveInFlight = false;
     clearCopyStatus();
@@ -1208,10 +1120,10 @@ function onFocusToggleClick() {
       setTestInitialState(value) { getResolver().setTestInitialState(value); },
       scan: () => scan(ROOT.document),
       flush, init, destroy,
-      setThreshold: value => setThreshold(value),
-      getThreshold: () => threshold,
-      setFocusPopular: (value, storage) => setFocusPopular(value, storage),
-      getFocusPopular: () => focusPopular,
+      setThreshold: value => writeStoredThreshold(value),
+      getThreshold: () => readStoredThreshold(),
+      setFocusPopular: (value, _storage) => writeStoredFocusPopular(value).persisted,
+      getFocusPopular: () => readStoredFocusPopular(),
       getCounters: () => Object.assign({}, counters, {
         bindings: eventBindings.length,
         observerRootIsBody: observerRoot === ROOT.document.body

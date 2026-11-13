@@ -9,8 +9,6 @@ import { getChrome, getLocalStorage } from './env.js';
 import { normalizeSpace } from './text.js';
 import {
   DEFAULT_THRESHOLD,
-  THRESHOLD_STORAGE_KEY,
-  FOCUS_STORAGE_KEY,
   parseThreshold
 } from './pure.js';
 
@@ -19,6 +17,8 @@ export const LIBRARY_USERNAME_KEY = 'xhs-enhanced:library-username';
 export const LIBRARY_ACCOUNT_ID_KEY = 'xhs-enhanced:library-account-id';
 export const LIBRARY_PASSWORD_KEY = 'xhs-enhanced:library-password';
 export const LIBRARY_REFRESH_KEY = 'xhs-enhanced:library-refresh-token';
+export const THRESHOLD_KEY = 'xhs-enhanced:popular-threshold';
+export const FOCUS_KEY = 'xhs-enhanced:focus-popular';
 export const LIBRARY_KEYS = Object.freeze([
   LIBRARY_BASE_URL_KEY,
   LIBRARY_USERNAME_KEY,
@@ -26,6 +26,12 @@ export const LIBRARY_KEYS = Object.freeze([
   LIBRARY_PASSWORD_KEY,
   LIBRARY_REFRESH_KEY
 ]);
+// Keys the options page and the content scripts share; read once at startup
+// and kept fresh via storage.onChanged. Deliberately separate from
+// LIBRARY_KEYS: "清除内容库设置" must not wipe user preferences, and vice
+// versa.
+export const PREF_KEYS = Object.freeze([THRESHOLD_KEY, FOCUS_KEY]);
+export const STORAGE_KEYS = Object.freeze(LIBRARY_KEYS.concat(PREF_KEYS));
 
 function chromeStorage() {
   const chrome = getChrome();
@@ -46,6 +52,15 @@ const libraryCache = {
   refreshToken: ''
 };
 let libraryHydrated = false;
+// Preferences shared with the options page (threshold, focus mode).
+let thresholdCache = DEFAULT_THRESHOLD;
+let focusCache = false;
+
+function parseThresholdSafe(value) {
+  if (value == null) return DEFAULT_THRESHOLD;
+  const parsed = parseThreshold(String(value));
+  return parsed.ok ? parsed.value : DEFAULT_THRESHOLD;
+}
 
 function readLocal(key) {
   const storage = getLocalStorage();
@@ -110,7 +125,7 @@ function subscribeToChanges() {
     if (!onChanged || typeof onChanged.addListener !== 'function') return;
     onChanged.addListener((changes, areaName) => {
       if (areaName !== 'local' || !changes) return;
-      for (const key of LIBRARY_KEYS) {
+      for (const key of STORAGE_KEYS) {
         if (!Object.prototype.hasOwnProperty.call(changes, key)) continue;
         const value = changes[key] ? changes[key].newValue : undefined;
         if (key === LIBRARY_BASE_URL_KEY) libraryCache.baseUrl = value == null ? '' : String(value);
@@ -121,6 +136,8 @@ function subscribeToChanges() {
         }
         else if (key === LIBRARY_PASSWORD_KEY) libraryCache.password = value == null ? '' : String(value);
         else if (key === LIBRARY_REFRESH_KEY) libraryCache.refreshToken = value == null ? '' : String(value);
+        else if (key === THRESHOLD_KEY) thresholdCache = parseThresholdSafe(value);
+        else if (key === FOCUS_KEY) focusCache = value === true || value === '1';
       }
     });
   } catch (_) {}
@@ -138,17 +155,26 @@ async function hydrate() {
       [LIBRARY_PASSWORD_KEY]: readLocal(LIBRARY_PASSWORD_KEY),
       [LIBRARY_REFRESH_KEY]: readLocal(LIBRARY_REFRESH_KEY)
     });
+    thresholdCache = parseThresholdSafe(readLocal(THRESHOLD_KEY));
+    focusCache = readLocal(FOCUS_KEY) === '1';
     libraryHydrated = true;
     return;
   }
   let items = {};
   try {
-    items = (await store.get(LIBRARY_KEYS.slice())) || {};
+    items = (await store.get(STORAGE_KEYS.slice())) || {};
   } catch (_) {
     items = {};
   }
   applyLibraryItems(items);
+  thresholdCache = parseThresholdSafe(items[THRESHOLD_KEY]);
+  focusCache = items[FOCUS_KEY] === true || items[FOCUS_KEY] === '1';
   const legacy = migrateLegacyLocalStorage();
+  // Preference keys: the userscript kept them in page localStorage. The
+  // options page is a different origin, so move them into chrome.storage.
+  for (const key of PREF_KEYS) {
+    if (items[key] == null && readLocal(key)) legacy.push([key, readLocal(key)]);
+  }
   if (legacy.length) {
     const patch = {};
     for (const [key, value] of legacy) {
@@ -157,6 +183,8 @@ async function hydrate() {
         if (key === LIBRARY_BASE_URL_KEY) libraryCache.baseUrl = value;
         if (key === LIBRARY_USERNAME_KEY) libraryCache.username = value;
         if (key === LIBRARY_ACCOUNT_ID_KEY) libraryCache.accountId = Number(value) || 0;
+        if (key === THRESHOLD_KEY) thresholdCache = parseThresholdSafe(value);
+        if (key === FOCUS_KEY) focusCache = value === '1';
       }
     }
     if (Object.keys(patch).length) {
@@ -278,25 +306,48 @@ export async function clearLibrarySettings() {
   return true;
 }
 
-// --- Threshold / focus mode (page-local, same as the userscript) ------------
+// --- Threshold / focus mode -------------------------------------------------
+// Stored in chrome.storage.local so the options page (different origin) can
+// read and write them; hydrated at startup, kept fresh via storage.onChanged,
+// and simply falling back to localStorage when chrome.storage is unavailable
+// (plain-browser / unit-test contexts).
 
 export function readStoredThreshold(storage) {
-  const source = storage === undefined ? getLocalStorage() : storage;
-  if (!source) return DEFAULT_THRESHOLD;
-  try {
-    const parsed = parseThreshold(source.getItem(THRESHOLD_STORAGE_KEY));
-    return parsed.ok ? parsed.value : DEFAULT_THRESHOLD;
-  } catch (_) {
-    return DEFAULT_THRESHOLD;
+  if (storage !== undefined) {
+    // Explicit localStorage-like injection (unit tests / plain-browser fallback).
+    if (!storage) return DEFAULT_THRESHOLD;
+    try {
+      const parsed = parseThreshold(storage.getItem(THRESHOLD_KEY));
+      return parsed.ok ? parsed.value : DEFAULT_THRESHOLD;
+    } catch (_) {
+      return DEFAULT_THRESHOLD;
+    }
   }
+  return thresholdCache;
 }
 
 export function readStoredFocusPopular(storage) {
-  const source = storage === undefined ? getLocalStorage() : storage;
-  if (!source) return false;
-  try {
-    return source.getItem(FOCUS_STORAGE_KEY) === '1';
-  } catch (_) {
-    return false;
+  if (storage !== undefined) {
+    if (!storage) return false;
+    try {
+      return storage.getItem(FOCUS_KEY) === '1';
+    } catch (_) {
+      return false;
+    }
   }
+  return focusCache;
+}
+
+// Persist a threshold. Returns { ok, value, persisted }. The caller keeps
+// rendering from readStoredThreshold().
+export function writeStoredThreshold(value) {
+  const parsed = parseThreshold(value);
+  if (!parsed.ok) return { ok: false, value: thresholdCache, persisted: false };
+  thresholdCache = parsed.value;
+  return { ok: true, value: thresholdCache, persisted: persistLibrary({ [THRESHOLD_KEY]: String(thresholdCache) }) };
+}
+
+export function writeStoredFocusPopular(value) {
+  focusCache = Boolean(value);
+  return { ok: true, value: focusCache, persisted: persistLibrary({ [FOCUS_KEY]: focusCache ? '1' : '0' }) };
 }

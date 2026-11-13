@@ -69,9 +69,8 @@ const content = read('extension/content.js');
 for (const required of [
   'xhs-enhanced-jump-next', 'xhs-enhanced-jump-prev', 'xhs-enhanced-focus-toggle',
   'xhs-enhanced-card--dimmed', 'xhs-enhanced-jump-status', 'xhs-enhanced-copy-status',
-  'xhs-enhanced-library-page', 'xhs-enhanced-library-batch', 'xhs-enhanced-library-toggle',
-  'xhs-enhanced-save-library', 'xhs-enhanced-card--popular', 'xhs-enhanced-like--popular',
-  'xhs-enhanced-threshold-control'
+  'xhs-enhanced-library-page', 'xhs-enhanced-library-batch', 'xhs-enhanced-settings',
+  'xhs-enhanced-save-library', 'xhs-enhanced-card--popular', 'xhs-enhanced-like--popular'
 ]) {
   assert(content.includes(required), `bundle missing marker: ${required}`);
 }
@@ -105,6 +104,7 @@ const optionsHtml = read('extension/options.html');
 assert(optionsHtml.includes('options.js'), 'options.html must load options.js');
 assert(optionsHtml.includes('options.css'), 'options.html must load options.css');
 assert(optionsHtml.includes('id="library-base-url"'), 'options page must expose the server address field');
+assert(optionsHtml.includes('id="popular-threshold"'), 'options page must expose the popularity-threshold field');
 const optionsJs = read('extension/options.js');
 for (const required of ['chrome.permissions.request', 'library-test', 'library-save', 'clearLibrarySettings']) {
   assert(optionsJs.includes(required), `options.js missing: ${required}`);

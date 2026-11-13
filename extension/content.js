@@ -29,8 +29,6 @@
 
   // src/lib/pure.js
   var DEFAULT_THRESHOLD = 100;
-  var THRESHOLD_STORAGE_KEY = "xhs-enhanced:popular-threshold";
-  var FOCUS_STORAGE_KEY = "xhs-enhanced:focus-popular";
   var SHARE_BASE = "https://www.xiaohongshu.com/";
   var XSEC_TOKEN_QUERY = "xsec_token";
   var XSEC_SOURCE_VALUE = "pc_feed";
@@ -390,6 +388,8 @@
   var LIBRARY_ACCOUNT_ID_KEY = "xhs-enhanced:library-account-id";
   var LIBRARY_PASSWORD_KEY = "xhs-enhanced:library-password";
   var LIBRARY_REFRESH_KEY = "xhs-enhanced:library-refresh-token";
+  var THRESHOLD_KEY = "xhs-enhanced:popular-threshold";
+  var FOCUS_KEY = "xhs-enhanced:focus-popular";
   var LIBRARY_KEYS = Object.freeze([
     LIBRARY_BASE_URL_KEY,
     LIBRARY_USERNAME_KEY,
@@ -397,6 +397,8 @@
     LIBRARY_PASSWORD_KEY,
     LIBRARY_REFRESH_KEY
   ]);
+  var PREF_KEYS = Object.freeze([THRESHOLD_KEY, FOCUS_KEY]);
+  var STORAGE_KEYS = Object.freeze(LIBRARY_KEYS.concat(PREF_KEYS));
   function chromeStorage() {
     const chrome = getChrome();
     try {
@@ -413,6 +415,13 @@
     refreshToken: ""
   };
   var libraryHydrated = false;
+  var thresholdCache = DEFAULT_THRESHOLD;
+  var focusCache = false;
+  function parseThresholdSafe(value) {
+    if (value == null) return DEFAULT_THRESHOLD;
+    const parsed = parseThreshold(String(value));
+    return parsed.ok ? parsed.value : DEFAULT_THRESHOLD;
+  }
   function readLocal(key) {
     const storage = getLocalStorage();
     if (!storage) return "";
@@ -466,7 +475,7 @@
       if (!onChanged || typeof onChanged.addListener !== "function") return;
       onChanged.addListener((changes, areaName) => {
         if (areaName !== "local" || !changes) return;
-        for (const key of LIBRARY_KEYS) {
+        for (const key of STORAGE_KEYS) {
           if (!Object.prototype.hasOwnProperty.call(changes, key)) continue;
           const value = changes[key] ? changes[key].newValue : void 0;
           if (key === LIBRARY_BASE_URL_KEY) libraryCache.baseUrl = value == null ? "" : String(value);
@@ -476,6 +485,8 @@
             if (!Number.isSafeInteger(libraryCache.accountId) || libraryCache.accountId < 0) libraryCache.accountId = 0;
           } else if (key === LIBRARY_PASSWORD_KEY) libraryCache.password = value == null ? "" : String(value);
           else if (key === LIBRARY_REFRESH_KEY) libraryCache.refreshToken = value == null ? "" : String(value);
+          else if (key === THRESHOLD_KEY) thresholdCache = parseThresholdSafe(value);
+          else if (key === FOCUS_KEY) focusCache = value === true || value === "1";
         }
       });
     } catch (_) {
@@ -492,17 +503,24 @@
         [LIBRARY_PASSWORD_KEY]: readLocal(LIBRARY_PASSWORD_KEY),
         [LIBRARY_REFRESH_KEY]: readLocal(LIBRARY_REFRESH_KEY)
       });
+      thresholdCache = parseThresholdSafe(readLocal(THRESHOLD_KEY));
+      focusCache = readLocal(FOCUS_KEY) === "1";
       libraryHydrated = true;
       return;
     }
     let items = {};
     try {
-      items = await store.get(LIBRARY_KEYS.slice()) || {};
+      items = await store.get(STORAGE_KEYS.slice()) || {};
     } catch (_) {
       items = {};
     }
     applyLibraryItems(items);
+    thresholdCache = parseThresholdSafe(items[THRESHOLD_KEY]);
+    focusCache = items[FOCUS_KEY] === true || items[FOCUS_KEY] === "1";
     const legacy = migrateLegacyLocalStorage();
+    for (const key of PREF_KEYS) {
+      if (items[key] == null && readLocal(key)) legacy.push([key, readLocal(key)]);
+    }
     if (legacy.length) {
       const patch = {};
       for (const [key, value] of legacy) {
@@ -511,6 +529,8 @@
           if (key === LIBRARY_BASE_URL_KEY) libraryCache.baseUrl = value;
           if (key === LIBRARY_USERNAME_KEY) libraryCache.username = value;
           if (key === LIBRARY_ACCOUNT_ID_KEY) libraryCache.accountId = Number(value) || 0;
+          if (key === THRESHOLD_KEY) thresholdCache = parseThresholdSafe(value);
+          if (key === FOCUS_KEY) focusCache = value === "1";
         }
       }
       if (Object.keys(patch).length) {
@@ -599,23 +619,37 @@
     return libraryCache.refreshToken || "";
   }
   function readStoredThreshold(storage) {
-    const source = storage === void 0 ? getLocalStorage() : storage;
-    if (!source) return DEFAULT_THRESHOLD;
-    try {
-      const parsed = parseThreshold(source.getItem(THRESHOLD_STORAGE_KEY));
-      return parsed.ok ? parsed.value : DEFAULT_THRESHOLD;
-    } catch (_) {
-      return DEFAULT_THRESHOLD;
+    if (storage !== void 0) {
+      if (!storage) return DEFAULT_THRESHOLD;
+      try {
+        const parsed = parseThreshold(storage.getItem(THRESHOLD_KEY));
+        return parsed.ok ? parsed.value : DEFAULT_THRESHOLD;
+      } catch (_) {
+        return DEFAULT_THRESHOLD;
+      }
     }
+    return thresholdCache;
   }
   function readStoredFocusPopular(storage) {
-    const source = storage === void 0 ? getLocalStorage() : storage;
-    if (!source) return false;
-    try {
-      return source.getItem(FOCUS_STORAGE_KEY) === "1";
-    } catch (_) {
-      return false;
+    if (storage !== void 0) {
+      if (!storage) return false;
+      try {
+        return storage.getItem(FOCUS_KEY) === "1";
+      } catch (_) {
+        return false;
+      }
     }
+    return focusCache;
+  }
+  function writeStoredThreshold(value) {
+    const parsed = parseThreshold(value);
+    if (!parsed.ok) return { ok: false, value: thresholdCache, persisted: false };
+    thresholdCache = parsed.value;
+    return { ok: true, value: thresholdCache, persisted: persistLibrary({ [THRESHOLD_KEY]: String(thresholdCache) }) };
+  }
+  function writeStoredFocusPopular(value) {
+    focusCache = Boolean(value);
+    return { ok: true, value: focusCache, persisted: persistLibrary({ [FOCUS_KEY]: focusCache ? "1" : "0" }) };
   }
 
   // src/lib/remote.js
@@ -1178,9 +1212,6 @@
   var JUMP_BUTTON_ID = "xhs-enhanced-jump-next";
   var JUMP_PREV_BUTTON_ID = "xhs-enhanced-jump-prev";
   var JUMP_STATUS_ID = "xhs-enhanced-jump-status";
-  var THRESHOLD_CONTROL_ID = "xhs-enhanced-threshold-control";
-  var THRESHOLD_INPUT_ID = "xhs-enhanced-threshold-input";
-  var THRESHOLD_STATUS_ID = "xhs-enhanced-threshold-status";
   var JUMP_BUTTON_TEXT = "\u4E0B\u4E00\u6761\u70ED\u95E8\u7B14\u8BB0";
   var JUMP_PREV_BUTTON_TEXT = "\u4E0A\u4E00\u6761\u70ED\u95E8\u7B14\u8BB0";
   var LAST_NOTE_TEXT = "\u5DF2\u7ECF\u662F\u6700\u540E\u4E00\u6761\u70ED\u95E8\u7B14\u8BB0";
@@ -1214,8 +1245,8 @@
   var LIBRARY_BATCH_BUTTON_ID = "xhs-enhanced-library-batch";
   var LIBRARY_BATCH_BUTTON_TEXT = "\u672C\u9875\u5168\u90E8\u5165\u5E93";
   var LIBRARY_BATCH_EMPTY_TEXT = "\u672C\u9875\u6CA1\u6709\u53EF\u5165\u5E93\u7684\u7B14\u8BB0\u94FE\u63A5";
-  var LIBRARY_TOGGLE_ID = "xhs-enhanced-library-toggle";
-  var LIBRARY_TOGGLE_TEXT = "\u5185\u5BB9\u5E93\u8BBE\u7F6E";
+  var SETTINGS_BUTTON_ID = "xhs-enhanced-settings";
+  var SETTINGS_BUTTON_TEXT = "\u2699 \u8BBE\u7F6E";
   var LIBRARY_SAVED_OK = "\u5DF2\u4FDD\u5B58\u5230\u5185\u5BB9\u5E93";
   var LIBRARY_SAVE_FAIL = "\u5185\u5BB9\u5E93\u4FDD\u5B58\u5931\u8D25";
   var LIBRARY_NO_TOKEN = "\u672A\u83B7\u53D6\u5230 xsec_token\uFF0C\u65E0\u6CD5\u91C7\u96C6";
@@ -1250,19 +1281,13 @@
   var jumpButton = null;
   var jumpPrevButton = null;
   var jumpStatus = null;
-  var thresholdControl = null;
-  var thresholdInput = null;
-  var thresholdStatus = null;
-  var threshold = DEFAULT_THRESHOLD;
   var jumpStatusTimer = null;
-  var focusPopular = false;
   var focusToggle = null;
   var copyStatus = null;
   var copyStatusTimer = null;
   var copyCoverInFlight = false;
   var downloadCoverInFlight = false;
   var saveInFlight = false;
-  var libraryToggle = null;
   var libraryPageButton = null;
   var libraryBatchButton = null;
   var fallbackTokenResolver = null;
@@ -1281,46 +1306,11 @@
   function clearFallbackTokenCache() {
     if (fallbackTokenResolver) fallbackTokenResolver.clearFallbackTokenCache();
   }
-  function getStorage() {
-    try {
-      return ROOT.localStorage || null;
-    } catch (_) {
-      return null;
-    }
-  }
-  function setThreshold(value, storage = getStorage()) {
-    const parsed = parseThreshold(value);
-    if (!parsed.ok) return { ok: false, value: threshold, persisted: false };
-    threshold = parsed.value;
-    let persisted = false;
-    if (storage) {
-      try {
-        storage.setItem(THRESHOLD_STORAGE_KEY, String(threshold));
-        persisted = true;
-      } catch (_) {
-      }
-    }
-    return { ok: true, value: threshold, persisted };
-  }
-  function setFocusPopular(value, storage = getStorage()) {
-    focusPopular = Boolean(value);
-    let persisted = false;
-    if (storage) {
-      try {
-        storage.setItem(FOCUS_STORAGE_KEY, focusPopular ? "1" : "0");
-        persisted = true;
-      } catch (_) {
-      }
-    }
-    return persisted;
-  }
-  function applyFocusToggleState() {
-    if (focusToggle) focusToggle.setAttribute("aria-pressed", focusPopular ? "true" : "false");
-  }
   function onFocusToggleClick() {
-    const persisted = setFocusPopular(!focusPopular);
-    applyFocusToggleState();
-    showCopyStatus(focusPopular ? persisted ? "\u5DF2\u5F00\u542F\uFF1A\u53EA\u663E\u793A\u70ED\u95E8\u7B14\u8BB0" : "\u5DF2\u5F00\u542F\uFF1A\u53EA\u663E\u793A\u70ED\u95E8\u7B14\u8BB0\uFF08\u8BBE\u7F6E\u672A\u80FD\u4FDD\u5B58\uFF09" : "\u5DF2\u5173\u95ED\uFF1A\u663E\u793A\u5168\u90E8\u7B14\u8BB0");
+    const enabled = !readStoredFocusPopular();
+    const { persisted } = writeStoredFocusPopular(enabled);
+    if (focusToggle) focusToggle.setAttribute("aria-pressed", enabled ? "true" : "false");
+    showCopyStatus((enabled ? "\u5DF2\u5F00\u542F\uFF1A\u53EA\u663E\u793A\u70ED\u95E8\u7B14\u8BB0" : "\u5DF2\u5173\u95ED\uFF1A\u663E\u793A\u5168\u90E8\u7B14\u8BB0") + (persisted ? "" : "\uFF08\u8BBE\u7F6E\u672A\u80FD\u4FDD\u5B58\uFF09"));
     scan(ROOT.document);
   }
   function resolveCardNoteLink(card) {
@@ -1512,6 +1502,32 @@
     }
     showCopyStatus('\u8BF7\u5728\u6269\u5C55\u8BE6\u60C5\u9875\u6253\u5F00"\u9009\u9879"\u914D\u7F6E\u5185\u5BB9\u5E93');
     return false;
+  }
+  function subscribePreferenceChanges() {
+    const chromeObj = ROOT.chrome;
+    try {
+      const store = chromeObj && chromeObj.storage;
+      const onChanged = store && store.onChanged;
+      if (!onChanged || typeof onChanged.addListener !== "function") return;
+      preferenceChangeHandler = (changes, areaName) => {
+        if (areaName !== "local" || !changes) return;
+        if (!Object.prototype.hasOwnProperty.call(changes, THRESHOLD_KEY) && !Object.prototype.hasOwnProperty.call(changes, FOCUS_KEY)) return;
+        scan(ROOT.document);
+      };
+      onChanged.addListener(preferenceChangeHandler);
+    } catch (_) {
+    }
+  }
+  function unsubscribePreferenceChanges() {
+    const chromeObj = ROOT.chrome;
+    try {
+      const onChanged = chromeObj && chromeObj.storage && chromeObj.storage.onChanged;
+      if (onChanged && typeof onChanged.removeListener === "function" && preferenceChangeHandler) {
+        onChanged.removeListener(preferenceChangeHandler);
+      }
+    } catch (_) {
+    }
+    preferenceChangeHandler = null;
   }
   function submitNoteUrlsToLibrary(urls, options) {
     const silent = Boolean(options && options.silent);
@@ -1730,32 +1746,28 @@
     style.textContent = `
       .${CARD_CLASS}{outline:2px solid #ff2442!important;background:rgba(255,36,66,.07)!important;box-shadow:0 2px 10px rgba(255,36,66,.14)!important}
       .${LIKE_CLASS}{color:#ff2442!important;font-weight:700!important}
-      #${JUMP_NAV_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;display:flex;gap:8px}
-      #${JUMP_PREV_BUTTON_ID},#${JUMP_BUTTON_ID}{border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
+      #${JUMP_NAV_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;display:flex;gap:8px;align-items:center}
+      #${JUMP_PREV_BUTTON_ID},#${JUMP_BUTTON_ID},#${FOCUS_TOGGLE_ID}{border:0;border-radius:999px;padding:9px 15px;font:600 13px/1.4 system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.22);cursor:pointer;transition:background .15s ease,color .15s ease,opacity .15s ease}
+      #${JUMP_PREV_BUTTON_ID},#${JUMP_BUTTON_ID}{background:#ff2442;color:#fff}
       #${JUMP_PREV_BUTTON_ID}:hover,#${JUMP_BUTTON_ID}:hover{background:#e61e3c}
-      #${JUMP_PREV_BUTTON_ID}:focus-visible,#${JUMP_BUTTON_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
-      #${FOCUS_TOGGLE_ID}{border:0;border-radius:999px;padding:10px 16px;background:rgba(30,30,30,.9);color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
-      #${FOCUS_TOGGLE_ID}:hover{background:rgba(15,15,15,1)}
-      #${FOCUS_TOGGLE_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
-      #${FOCUS_TOGGLE_ID}[aria-pressed="true"]{background:#ff2442}
-      #${FOCUS_TOGGLE_ID}[aria-pressed="true"]:hover{background:#e61e3c}
+      #${JUMP_PREV_BUTTON_ID}:focus-visible,#${JUMP_BUTTON_ID}:focus-visible,#${FOCUS_TOGGLE_ID}:focus-visible,#${LIBRARY_PAGE_BUTTON_ID}:focus-visible,#${LIBRARY_BATCH_BUTTON_ID}:focus-visible,#${SETTINGS_BUTTON_ID}:focus-visible{outline:2px solid #fff;outline-offset:2px}
+      #${FOCUS_TOGGLE_ID}{background:rgba(30,30,30,.88);color:#fff}
+      #${FOCUS_TOGGLE_ID}:hover{background:rgba(15,15,15,.98)}
+      #${FOCUS_TOGGLE_ID}[aria-pressed="true"]{background:#ff2442;color:#fff}
       .${DIMMED_CLASS}{filter:blur(8px) grayscale(.35);opacity:.55;transition:filter .18s ease,opacity .18s ease}
       .${DIMMED_CLASS}:hover{filter:none;opacity:1}
-      #${THRESHOLD_CONTROL_ID}{position:fixed;top:138px;right:24px;z-index:2147483646;display:flex;gap:6px;align-items:center;padding:8px;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.16);font:14px/1.4 system-ui,sans-serif}
-      #${THRESHOLD_INPUT_ID}{width:72px;border:1px solid #aaa;border-radius:4px;padding:5px 6px;font:inherit}#${THRESHOLD_CONTROL_ID} button{border:0;border-radius:4px;padding:6px 9px;background:#ff2442;color:#fff;font:600 13px/1 system-ui,sans-serif;cursor:pointer}
-      #${THRESHOLD_STATUS_ID}{position:fixed;top:190px;right:24px;z-index:2147483646;max-width:260px;padding:7px 10px;border-radius:6px;background:rgba(30,30,30,.92);color:#fff;font:13px/1.4 system-ui,sans-serif;pointer-events:none}
-      #${JUMP_STATUS_ID}{position:fixed;top:228px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
-      #${COPY_STATUS_ID}{position:fixed;top:276px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:14px/1.4 system-ui,sans-serif;pointer-events:none}
-      #${LIBRARY_PAGE_BUTTON_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
-      #${LIBRARY_PAGE_BUTTON_ID}:hover{background:#e61e3c}#${LIBRARY_PAGE_BUTTON_ID}:focus-visible{outline:3px solid #111;outline-offset:3px}
-      #${LIBRARY_BATCH_BUTTON_ID}{position:fixed;top:316px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:#ff2442;color:#fff;font:600 13px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
-      #${LIBRARY_BATCH_BUTTON_ID}:hover{background:#e61e3c}#${LIBRARY_BATCH_BUTTON_ID}:disabled{opacity:.6;cursor:default}
-      #${LIBRARY_TOGGLE_ID}{position:fixed;bottom:24px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 16px;background:rgba(30,30,30,.9);color:#fff;font:600 13px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.2);cursor:pointer}
-      #${LIBRARY_TOGGLE_ID}:hover{background:rgba(15,15,15,1)}
+      #${JUMP_STATUS_ID}{position:fixed;top:136px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:13px/1.5 system-ui,sans-serif;pointer-events:none}
+      #${COPY_STATUS_ID}{position:fixed;top:182px;right:24px;z-index:2147483646;max-width:260px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.92);color:#fff;font:13px/1.5 system-ui,sans-serif;pointer-events:none}
+      #${LIBRARY_PAGE_BUTTON_ID}{position:fixed;top:88px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 18px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.25);cursor:pointer}
+      #${LIBRARY_PAGE_BUTTON_ID}:hover{background:#e61e3c}
+      #${LIBRARY_BATCH_BUTTON_ID}{position:fixed;top:316px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:10px 18px;background:#ff2442;color:#fff;font:600 14px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.25);cursor:pointer}
+      #${LIBRARY_BATCH_BUTTON_ID}:hover{background:#e61e3c}#${LIBRARY_BATCH_BUTTON_ID}:disabled{opacity:.55;cursor:default}
+      #${SETTINGS_BUTTON_ID}{position:fixed;bottom:24px;right:24px;z-index:2147483646;border:0;border-radius:999px;padding:9px 16px;background:rgba(30,30,30,.88);color:#fff;font:600 13px/1.4 system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.2);cursor:pointer}
+      #${SETTINGS_BUTTON_ID}:hover{background:rgba(15,15,15,.98)}
       .${CARD_ACTIONS_CLASS}{position:absolute;top:6px;left:6px;z-index:2147483640;display:flex;gap:4px;opacity:0;transition:opacity .15s ease;pointer-events:none}
       .xhs-enhanced-card--popular .${CARD_ACTIONS_CLASS},.note-item:hover .${CARD_ACTIONS_CLASS},section.note-item:hover .${CARD_ACTIONS_CLASS},article.note-item:hover .${CARD_ACTIONS_CLASS}{opacity:1;pointer-events:auto}
       [data-note-card],article.note-item,section.note-item,.note-item{position:relative}
-      .${CARD_ACTIONS_CLASS} button{border:0;border-radius:6px;padding:5px 9px;background:rgba(255,36,66,.92);color:#fff;font:600 12px/1 system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.18)}
+      .${CARD_ACTIONS_CLASS} button{border:0;border-radius:6px;padding:5px 8px;background:rgba(255,36,66,.92);color:#fff;font:600 11px/1.35 system-ui,sans-serif;white-space:nowrap;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.18)}
       .${CARD_ACTIONS_CLASS} button:hover{background:#e61e3c}
       .${COPY_COVER_CLASS}{background:rgba(30,30,30,.82)!important}
       .${DOWNLOAD_COVER_CLASS}{background:rgba(37,99,235,.92)!important}
@@ -1768,9 +1780,9 @@
     const like = extractLike(card);
     const route = getCurrentRoute();
     const signature = signatureFor(route, like ? like.raw : "");
-    const popular = Boolean(like && like.parsed.value > threshold);
+    const popular = Boolean(like && like.parsed.value > readStoredThreshold());
     card.classList.toggle(CARD_CLASS, popular);
-    card.classList.toggle(DIMMED_CLASS, focusPopular && !popular);
+    card.classList.toggle(DIMMED_CLASS, readStoredFocusPopular() && !popular);
     for (const stale of card.querySelectorAll(`.${LIKE_CLASS}`)) if (!like || stale !== like.node) stale.classList.remove(LIKE_CLASS);
     if (like) like.node.classList.toggle(LIKE_CLASS, popular);
     card.setAttribute(SIGNATURE_ATTRIBUTE, signature);
@@ -1904,81 +1916,13 @@
       toggle.type = "button";
       toggle.textContent = FOCUS_TOGGLE_TEXT;
       toggle.setAttribute("aria-label", FOCUS_TOGGLE_TEXT);
-      toggle.setAttribute("aria-pressed", focusPopular ? "true" : "false");
+      toggle.setAttribute("aria-pressed", readStoredFocusPopular() ? "true" : "false");
       toggle.addEventListener("click", onFocusToggleClick);
     }
     focusToggle = toggle;
     if (prev.parentElement !== nav) nav.appendChild(prev);
     if (button.parentElement !== nav) nav.appendChild(button);
     if (toggle.parentElement !== nav) nav.appendChild(toggle);
-  }
-  function showThresholdStatus(message) {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let node = thresholdStatus && thresholdStatus.isConnected ? thresholdStatus : ROOT.document.getElementById(THRESHOLD_STATUS_ID);
-    if (!node) {
-      node = ROOT.document.createElement("div");
-      node.id = THRESHOLD_STATUS_ID;
-      node.setAttribute("role", "status");
-      node.setAttribute("aria-live", "polite");
-      ROOT.document.body.appendChild(node);
-    }
-    node.textContent = message;
-    thresholdStatus = node;
-  }
-  function applyThresholdInput() {
-    if (!thresholdInput) return;
-    const result = setThreshold(thresholdInput.value);
-    thresholdInput.value = String(threshold);
-    if (!result.ok) {
-      showThresholdStatus(`\u8BF7\u8F93\u5165\u975E\u8D1F\u6574\u6570\uFF0C\u5F53\u524D\u9608\u503C\u4E3A ${threshold}`);
-      return;
-    }
-    showThresholdStatus(result.persisted ? `\u70ED\u95E8\u9608\u503C\u5DF2\u8BBE\u4E3A ${threshold}` : `\u70ED\u95E8\u9608\u503C\u5DF2\u8BBE\u4E3A ${threshold}\uFF0C\u4F46\u672A\u80FD\u4FDD\u5B58`);
-    scan(ROOT.document);
-  }
-  function ensureThresholdUi() {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let control = thresholdControl && thresholdControl.isConnected ? thresholdControl : ROOT.document.getElementById(THRESHOLD_CONTROL_ID);
-    let created = false;
-    if (!control) {
-      created = true;
-      control = ROOT.document.createElement("div");
-      control.id = THRESHOLD_CONTROL_ID;
-      control.setAttribute("role", "group");
-      control.setAttribute("aria-label", "\u70ED\u95E8\u9608\u503C\u8BBE\u7F6E");
-      const label = ROOT.document.createElement("label");
-      label.htmlFor = THRESHOLD_INPUT_ID;
-      label.textContent = "\u70ED\u95E8\u9608\u503C";
-      const input = ROOT.document.createElement("input");
-      input.id = THRESHOLD_INPUT_ID;
-      input.type = "text";
-      input.inputMode = "numeric";
-      input.setAttribute("aria-label", "\u70ED\u95E8\u9608\u503C");
-      const button = ROOT.document.createElement("button");
-      button.type = "button";
-      button.textContent = "\u5E94\u7528";
-      button.addEventListener("click", applyThresholdInput);
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") {
-          event.returnValue = false;
-          applyThresholdInput();
-        }
-      });
-      control.append(label, input, button);
-      ROOT.document.body.appendChild(control);
-    }
-    thresholdControl = control;
-    thresholdInput = control.querySelector(`#${THRESHOLD_INPUT_ID}`);
-    if (created && thresholdInput) thresholdInput.value = String(threshold);
-  }
-  function removeThresholdUi() {
-    const control = thresholdControl && thresholdControl.isConnected ? thresholdControl : ROOT.document && ROOT.document.getElementById(THRESHOLD_CONTROL_ID);
-    if (control) control.remove();
-    thresholdControl = null;
-    thresholdInput = null;
-    const status = thresholdStatus && thresholdStatus.isConnected ? thresholdStatus : ROOT.document && ROOT.document.getElementById(THRESHOLD_STATUS_ID);
-    if (status) status.remove();
-    thresholdStatus = null;
   }
   function removeJumpUi() {
     clearJumpStatus();
@@ -1993,24 +1937,27 @@
     jumpPrevButton = null;
     focusToggle = null;
   }
-  function ensureLibraryToggle() {
+  var settingsButton = null;
+  var preferenceChangeHandler = null;
+  function ensureSettingsButton() {
     if (!ROOT.document || !ROOT.document.body) return;
-    let button = libraryToggle && libraryToggle.isConnected ? libraryToggle : ROOT.document.getElementById(LIBRARY_TOGGLE_ID);
+    let button = settingsButton && settingsButton.isConnected ? settingsButton : ROOT.document.getElementById(SETTINGS_BUTTON_ID);
     if (!button) {
       button = ROOT.document.createElement("button");
-      button.id = LIBRARY_TOGGLE_ID;
+      button.id = SETTINGS_BUTTON_ID;
       button.type = "button";
-      button.textContent = LIBRARY_TOGGLE_TEXT;
-      button.setAttribute("aria-label", LIBRARY_TOGGLE_TEXT);
+      button.textContent = SETTINGS_BUTTON_TEXT;
+      button.setAttribute("aria-label", "\u6253\u5F00\u6269\u5C55\u9009\u9879\u9875\uFF08\u70ED\u95E8\u9608\u503C\u3001\u5185\u5BB9\u5E93\u8BBE\u7F6E\uFF09");
+      button.setAttribute("title", "\u6269\u5C55\u9009\u9879\uFF1A\u70ED\u95E8\u9608\u503C / \u5185\u5BB9\u5E93\u8BBE\u7F6E");
       button.addEventListener("click", openLibrarySettings);
       ROOT.document.body.appendChild(button);
     }
-    libraryToggle = button;
+    settingsButton = button;
   }
-  function removeLibraryToggle() {
-    const button = libraryToggle && libraryToggle.isConnected ? libraryToggle : ROOT.document && ROOT.document.getElementById(LIBRARY_TOGGLE_ID);
+  function removeSettingsButton() {
+    const button = settingsButton && settingsButton.isConnected ? settingsButton : ROOT.document && ROOT.document.getElementById(SETTINGS_BUTTON_ID);
     if (button) button.remove();
-    libraryToggle = null;
+    settingsButton = null;
   }
   function ensureLibraryPageButton() {
     if (!ROOT.document || !ROOT.document.body) return;
@@ -2051,7 +1998,7 @@
     libraryBatchButton = null;
   }
   function removeLibraryUi() {
-    removeLibraryToggle();
+    removeSettingsButton();
     removeLibraryPageButton();
     removeLibraryBatchButton();
   }
@@ -2059,13 +2006,13 @@
     if (!ROOT.document || !ROOT.document.body) return;
     const route = getCurrentRoute();
     if (isDetailRoute(route)) {
-      ensureLibraryToggle();
+      ensureSettingsButton();
       ensureLibraryPageButton();
       removeLibraryBatchButton();
       return;
     }
     if (isTargetRoute(route)) {
-      ensureLibraryToggle();
+      ensureSettingsButton();
       ensureLibraryBatchButton();
       removeLibraryPageButton();
       return;
@@ -2075,10 +2022,8 @@
   function syncJumpUi() {
     if (isTargetRoute(getCurrentRoute())) {
       ensureJumpUi();
-      ensureThresholdUi();
     } else {
       removeJumpUi();
-      removeThresholdUi();
     }
   }
   function flush() {
@@ -2122,8 +2067,14 @@
       if (!token || !token.active || lifecycleToken !== token) return;
       flush();
     };
-    if (typeof ROOT.requestAnimationFrame === "function") ROOT.requestAnimationFrame(run);
-    else Promise.resolve().then(run);
+    if (typeof ROOT.requestAnimationFrame === "function") {
+      ROOT.requestAnimationFrame(run);
+      if (ROOT.document && ROOT.document.visibilityState === "hidden" && typeof ROOT.setTimeout === "function") {
+        ROOT.setTimeout(run, 150);
+      }
+    } else {
+      Promise.resolve().then(run);
+    }
   }
   function scan(root) {
     if (!ROOT.document || !isTargetRoute(getCurrentRoute())) return;
@@ -2178,10 +2129,9 @@
     initialized = true;
     lifecycleToken = { active: true };
     destroyed = false;
-    threshold = readStoredThreshold();
-    focusPopular = readStoredFocusPopular();
     ensureStyle();
     bindObserverRoot(selectObserverRoot());
+    subscribePreferenceChanges();
     if (ROOT.document.documentElement && typeof ROOT.MutationObserver === "function") {
       structureObserver = new ROOT.MutationObserver(structureMutationCallback);
       structureObserver.observe(ROOT.document.documentElement, { childList: true, subtree: true });
@@ -2208,9 +2158,9 @@
     observerRoot = null;
     if (structureObserver) structureObserver.disconnect();
     structureObserver = null;
+    unsubscribePreferenceChanges();
     for (const [target, type, handler] of eventBindings.splice(0)) target.removeEventListener(type, handler);
     removeJumpUi();
-    removeThresholdUi();
     removeLibraryUi();
     saveInFlight = false;
     clearCopyStatus();
@@ -2280,10 +2230,10 @@
       flush,
       init,
       destroy,
-      setThreshold: (value) => setThreshold(value),
-      getThreshold: () => threshold,
-      setFocusPopular: (value, storage) => setFocusPopular(value, storage),
-      getFocusPopular: () => focusPopular,
+      setThreshold: (value) => writeStoredThreshold(value),
+      getThreshold: () => readStoredThreshold(),
+      setFocusPopular: (value, _storage) => writeStoredFocusPopular(value).persisted,
+      getFocusPopular: () => readStoredFocusPopular(),
       getCounters: () => Object.assign({}, counters, {
         bindings: eventBindings.length,
         observerRootIsBody: observerRoot === ROOT.document.body

@@ -50,6 +50,12 @@
           }
         },
         storage: {
+          onChanged: {
+            _listeners: [],
+            addListener(fn) { if (!this._listeners.includes(fn)) this._listeners.push(fn); },
+            removeListener(fn) { const i = this._listeners.indexOf(fn); if (i >= 0) this._listeners.splice(i, 1); },
+            _emit(changes) { for (const fn of this._listeners.slice()) fn(changes, 'local'); }
+          },
           local: {
             async get(keys) {
               if (keys == null) return Object.assign({}, store);
@@ -58,7 +64,14 @@
               for (const key of wanted) if (Object.prototype.hasOwnProperty.call(store, key)) out[key] = store[key];
               return out;
             },
-            async set(patch) { Object.assign(store, patch); },
+            async set(patch) {
+              const changes = {};
+              for (const [key, value] of Object.entries(patch)) {
+                changes[key] = { oldValue: store[key], newValue: value };
+                store[key] = value;
+              }
+              globalThis.chrome.storage.onChanged._emit(changes);
+            },
             async remove(keys) { for (const key of [].concat(keys)) delete store[key]; }
           }
         },

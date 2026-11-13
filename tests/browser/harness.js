@@ -54,9 +54,7 @@
   function jumpNav() { return document.getElementById('xhs-enhanced-jump-nav'); }
   function focusToggleNode() { return document.getElementById('xhs-enhanced-focus-toggle'); }
   function statusNode() { return document.getElementById('xhs-enhanced-jump-status'); }
-  function thresholdControl() { return document.getElementById('xhs-enhanced-threshold-control'); }
-  function thresholdInput() { return document.getElementById('xhs-enhanced-threshold-input'); }
-  function thresholdStatus() { return document.getElementById('xhs-enhanced-threshold-status'); }
+  function settingsButton() { return document.getElementById('xhs-enhanced-settings'); }
   function setRect(node, top, bottom = top + 200) { node.getBoundingClientRect = () => ({ top, bottom, left: 0, right: 100, width: 100, height: bottom - top }); }
 
   addEventListener('error', event => failures.push(`window error: ${event.message}`));
@@ -180,35 +178,23 @@
     assert(Boolean(searchCard.querySelector('.xhs-enhanced-card-actions')), 'returning to profile route restores copy actions');
   }
 
-  async function configurableThreshold() {
+  async function popularThresholdConfiguration() {
     api.setTestRoute('/search_result');
     await useFixture('search-source', '#search-fixture');
     api.scan(); await checkpoint();
-    assert(thresholdControl() && thresholdControl().getAttribute('role') === 'group' && thresholdInput(), 'threshold control is present and labelled');
-    assert(document.querySelectorAll('#xhs-enhanced-threshold-control').length === 1, 'threshold control is unique');
-    thresholdInput().value = '222';
-    card('101').querySelector('[data-like-count]').setAttribute('data-like-count', '102'); await checkpoint();
-    assert(thresholdInput().value === '222', 'unsubmitted threshold input survives feed mutations');
-
-    thresholdInput().value = '200';
-    thresholdControl().querySelector('button').click(); await checkpoint();
-    assert(api.getThreshold() === 200 && !popular(card('101')), 'configured threshold applies immediately with strict boundary');
-    assert(localStorage.getItem('xhs-enhanced:popular-threshold') === '200', 'configured threshold persists locally');
-
+    assert(!document.getElementById('xhs-enhanced-threshold-control'), 'no floating threshold control remains (moves to the options page)');
+    assert(popular(card('101')), 'default threshold 100 highlights 101');
+    // The options page persists through the same chrome.storage.local channel;
+    // the content script's test seam goes through the same write path.
+    api.setThreshold('200');
+    await checkpoint();
+    assert(api.getThreshold() === 200 && !popular(card('101')), 'written threshold re-renders open tabs immediately with strict boundary');
     api.destroy(); api.init(); await checkpoint();
-    assert(api.getThreshold() === 200 && thresholdInput().value === '200', 'stored threshold is restored before rescanning');
-
-    thresholdInput().value = '-1';
-    thresholdControl().querySelector('button').click(); await checkpoint();
-    assert(api.getThreshold() === 200 && thresholdInput().value === '200' && thresholdStatus().textContent.includes('请输入非负整数'), 'invalid threshold preserves the active value');
-    thresholdInput().value = '100';
-    thresholdInput().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await checkpoint();
-    assert(api.getThreshold() === 100 && popular(card('101')), 'keyboard apply restores strict 100/101 boundary');
-
-    api.setTestRoute('/explore/threshold'); await checkpoint();
-    assert(!thresholdControl() && !thresholdStatus(), 'threshold UI is removed outside supported routes');
-    api.setTestRoute('/search_result'); await checkpoint();
-    assert(document.querySelectorAll('#xhs-enhanced-threshold-control').length === 1, 'threshold UI is restored without duplication');
+    assert(api.getThreshold() === 200, 'stored threshold is restored before rescanning');
+    api.setThreshold('100');
+    await checkpoint();
+    assert(api.getThreshold() === 100 && popular(card('101')), 'reset back to 100 restores the strict boundary');
+    api.setThreshold('100');
   }
 
   async function librarySync() {
@@ -300,8 +286,8 @@
       navigate('/search_result/det1?xsec_token=tok&xsec_source=pc_search'); await checkpoint();
       assert(document.getElementById('xhs-enhanced-library-page'), 'search detail modal shows floating save button');
 
-      const toggle = document.getElementById('xhs-enhanced-library-toggle');
-      assert(toggle && toggle.textContent === '内容库设置', 'library settings button present');
+      const toggle = settingsButton();
+      assert(toggle && toggle.textContent === '⚙ 设置', 'settings button present in place of the old library-toggle');
       const optionsBefore = globalThis.__XHSE_OPEN_OPTIONS__ || 0;
       toggle.click(); await checkpoint();
       assert((globalThis.__XHSE_OPEN_OPTIONS__ || 0) === optionsBefore + 1, 'library settings button opens the extension options page');
@@ -406,7 +392,7 @@
 
   async function focusMode() {
     api.setTestRoute('/search_result');
-    localStorage.removeItem('xhs-enhanced:focus-popular');
+    delete globalThis.__XHS_CHROME_STORE__['xhs-enhanced:focus-popular'];
     const hot = makeCard('focus-hot', 101);
     const cold = makeCard('focus-cold', 99);
     sandbox.replaceChildren(hot, cold);
@@ -418,7 +404,7 @@
     assert(focusToggleNode().parentElement === jumpNav(), 'focus toggle lives in the jump nav row');
 
     toggleNode.click(); await checkpoint();
-    assert(toggleNode.getAttribute('aria-pressed') === 'true' && localStorage.getItem('xhs-enhanced:focus-popular') === '1', 'focus toggle turns on and persists');
+    assert(toggleNode.getAttribute('aria-pressed') === 'true' && globalThis.__XHS_CHROME_STORE__['xhs-enhanced:focus-popular'] === '1', 'focus toggle turns on and persists');
     assert(popular(hot) && !dimmed(hot), 'popular card stays clear');
     assert(dimmed(cold), 'non-popular card is blurred when focus mode is on');
     assert(cold.isConnected && sandbox.contains(cold) && !cold.hasAttribute('hidden'), 'dimmed card stays in place as a placeholder');
@@ -436,8 +422,8 @@
     assert(restored && restored.getAttribute('aria-pressed') === 'true' && dimmed(cold) && !dimmed(hot), 'focus state is restored from storage on return');
 
     restored.click(); await checkpoint();
-    assert(restored.getAttribute('aria-pressed') === 'false' && !dimmed(cold) && localStorage.getItem('xhs-enhanced:focus-popular') === '0' && api.getFocusPopular() === false, 'focus toggle turns off, cleans dimming and persists the off state');
-    localStorage.removeItem('xhs-enhanced:focus-popular');
+    assert(restored.getAttribute('aria-pressed') === 'false' && !dimmed(cold) && globalThis.__XHS_CHROME_STORE__['xhs-enhanced:focus-popular'] === '0' && api.getFocusPopular() === false, 'focus toggle turns off, cleans dimming and persists the off state');
+    delete globalThis.__XHS_CHROME_STORE__['xhs-enhanced:focus-popular'];
   }
 
   async function dynamicAndAttributes() {
@@ -587,7 +573,7 @@
       assert(Boolean(api), 'test API installed');
       await initialAndIdempotent();
       await profile();
-      await configurableThreshold();
+      await popularThresholdConfiguration();
       await librarySync();
       await dynamicAndAttributes();
       await jumpNavigation();

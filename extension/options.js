@@ -22,6 +22,13 @@
   }
 
   // src/lib/pure.js
+  var DEFAULT_THRESHOLD = 100;
+  function parseThreshold(value) {
+    const text = String(value == null ? "" : value);
+    if (!/^(?:0|[1-9]\d*)$/.test(text)) return { ok: false };
+    const parsed = Number(text);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? { ok: true, value: parsed } : { ok: false };
+  }
   function parseBaseUrl(value) {
     const text = normalizeSpace(value).replace(/\/+$/, "");
     if (!text || !/^https?:\/\/\S+$/i.test(text)) return { ok: false, value: "" };
@@ -34,6 +41,8 @@
   var LIBRARY_ACCOUNT_ID_KEY = "xhs-enhanced:library-account-id";
   var LIBRARY_PASSWORD_KEY = "xhs-enhanced:library-password";
   var LIBRARY_REFRESH_KEY = "xhs-enhanced:library-refresh-token";
+  var THRESHOLD_KEY = "xhs-enhanced:popular-threshold";
+  var FOCUS_KEY = "xhs-enhanced:focus-popular";
   var LIBRARY_KEYS = Object.freeze([
     LIBRARY_BASE_URL_KEY,
     LIBRARY_USERNAME_KEY,
@@ -41,6 +50,8 @@
     LIBRARY_PASSWORD_KEY,
     LIBRARY_REFRESH_KEY
   ]);
+  var PREF_KEYS = Object.freeze([THRESHOLD_KEY, FOCUS_KEY]);
+  var STORAGE_KEYS = Object.freeze(LIBRARY_KEYS.concat(PREF_KEYS));
   function chromeStorage() {
     const chrome2 = getChrome();
     try {
@@ -57,6 +68,13 @@
     refreshToken: ""
   };
   var libraryHydrated = false;
+  var thresholdCache = DEFAULT_THRESHOLD;
+  var focusCache = false;
+  function parseThresholdSafe(value) {
+    if (value == null) return DEFAULT_THRESHOLD;
+    const parsed = parseThreshold(String(value));
+    return parsed.ok ? parsed.value : DEFAULT_THRESHOLD;
+  }
   function readLocal(key) {
     const storage = getLocalStorage();
     if (!storage) return "";
@@ -110,7 +128,7 @@
       if (!onChanged || typeof onChanged.addListener !== "function") return;
       onChanged.addListener((changes, areaName) => {
         if (areaName !== "local" || !changes) return;
-        for (const key of LIBRARY_KEYS) {
+        for (const key of STORAGE_KEYS) {
           if (!Object.prototype.hasOwnProperty.call(changes, key)) continue;
           const value = changes[key] ? changes[key].newValue : void 0;
           if (key === LIBRARY_BASE_URL_KEY) libraryCache.baseUrl = value == null ? "" : String(value);
@@ -120,6 +138,8 @@
             if (!Number.isSafeInteger(libraryCache.accountId) || libraryCache.accountId < 0) libraryCache.accountId = 0;
           } else if (key === LIBRARY_PASSWORD_KEY) libraryCache.password = value == null ? "" : String(value);
           else if (key === LIBRARY_REFRESH_KEY) libraryCache.refreshToken = value == null ? "" : String(value);
+          else if (key === THRESHOLD_KEY) thresholdCache = parseThresholdSafe(value);
+          else if (key === FOCUS_KEY) focusCache = value === true || value === "1";
         }
       });
     } catch (_) {
@@ -136,17 +156,24 @@
         [LIBRARY_PASSWORD_KEY]: readLocal(LIBRARY_PASSWORD_KEY),
         [LIBRARY_REFRESH_KEY]: readLocal(LIBRARY_REFRESH_KEY)
       });
+      thresholdCache = parseThresholdSafe(readLocal(THRESHOLD_KEY));
+      focusCache = readLocal(FOCUS_KEY) === "1";
       libraryHydrated = true;
       return;
     }
     let items = {};
     try {
-      items = await store.get(LIBRARY_KEYS.slice()) || {};
+      items = await store.get(STORAGE_KEYS.slice()) || {};
     } catch (_) {
       items = {};
     }
     applyLibraryItems(items);
+    thresholdCache = parseThresholdSafe(items[THRESHOLD_KEY]);
+    focusCache = items[FOCUS_KEY] === true || items[FOCUS_KEY] === "1";
     const legacy = migrateLegacyLocalStorage();
+    for (const key of PREF_KEYS) {
+      if (items[key] == null && readLocal(key)) legacy.push([key, readLocal(key)]);
+    }
     if (legacy.length) {
       const patch = {};
       for (const [key, value] of legacy) {
@@ -155,6 +182,8 @@
           if (key === LIBRARY_BASE_URL_KEY) libraryCache.baseUrl = value;
           if (key === LIBRARY_USERNAME_KEY) libraryCache.username = value;
           if (key === LIBRARY_ACCOUNT_ID_KEY) libraryCache.accountId = Number(value) || 0;
+          if (key === THRESHOLD_KEY) thresholdCache = parseThresholdSafe(value);
+          if (key === FOCUS_KEY) focusCache = value === "1";
         }
       }
       if (Object.keys(patch).length) {
@@ -270,6 +299,24 @@
     for (const key of LIBRARY_KEYS) removeLocal(key);
     return true;
   }
+  function readStoredThreshold(storage) {
+    if (storage !== void 0) {
+      if (!storage) return DEFAULT_THRESHOLD;
+      try {
+        const parsed = parseThreshold(storage.getItem(THRESHOLD_KEY));
+        return parsed.ok ? parsed.value : DEFAULT_THRESHOLD;
+      } catch (_) {
+        return DEFAULT_THRESHOLD;
+      }
+    }
+    return thresholdCache;
+  }
+  function writeStoredThreshold(value) {
+    const parsed = parseThreshold(value);
+    if (!parsed.ok) return { ok: false, value: thresholdCache, persisted: false };
+    thresholdCache = parsed.value;
+    return { ok: true, value: thresholdCache, persisted: persistLibrary({ [THRESHOLD_KEY]: String(thresholdCache) }) };
+  }
 
   // src/lib/remote.js
   var FETCH_MESSAGE = "xhs-enhanced:fetch";
@@ -364,7 +411,8 @@
     save: document.getElementById("library-save"),
     clear: document.getElementById("library-clear"),
     status: document.getElementById("library-status"),
-    httpWarning: document.getElementById("library-http-warning")
+    httpWarning: document.getElementById("library-http-warning"),
+    threshold: document.getElementById("popular-threshold")
   };
   function isPlainHttp(value) {
     try {
@@ -405,6 +453,7 @@
     els.base.value = cfg.baseUrl;
     els.user.value = cfg.username;
     els.password.value = cfg.password;
+    if (els.threshold) els.threshold.value = String(readStoredThreshold());
     els.account.textContent = "";
     const placeholder = document.createElement("option");
     placeholder.value = "";
@@ -497,15 +546,22 @@
     showStatus("\u8FDE\u63A5\u6210\u529F\uFF0C\u5171\u53D1\u73B0 " + result.accounts.length + " \u4E2A\u8D26\u53F7" + (persisted ? "\uFF0C\u5DF2\u4FDD\u5B58" : "\uFF08\u4FDD\u5B58\u5931\u8D25\uFF09"));
   }
   async function onSave() {
+    const thresholdRaw = normalizeSpace(els.threshold ? els.threshold.value : "100");
+    const parsedThreshold = parseThreshold(thresholdRaw);
+    if (!parsedThreshold.ok) {
+      showStatus("\u70ED\u95E8\u9608\u503C\u9700\u4E3A\u975E\u8D1F\u6574\u6570\uFF08\u4F8B\u5982 100\uFF09\uFF0C\u8BBE\u7F6E\u672A\u4FDD\u5B58");
+      return;
+    }
+    const thresholdPersisted = writeStoredThreshold(parsedThreshold.value).persisted;
     const form = readForm();
     if (!form.base.ok) {
-      showStatus("\u670D\u52A1\u5668\u5730\u5740\u9700\u4EE5 http:// \u6216 https:// \u5F00\u5934");
+      showStatus("\u70ED\u95E8\u9608\u503C " + (thresholdPersisted ? "\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u670D\u52A1\u5668\u5730\u5740\u9700\u4EE5 http:// \u6216 https:// \u5F00\u5934" : "\u672A\u80FD\u6301\u4E45\u5316\uFF0C\u4E14\u670D\u52A1\u5668\u5730\u5740\u9700\u4EE5 http:// \u6216 https:// \u5F00\u5934"));
       return;
     }
     showStatus("\u6B63\u5728\u4FDD\u5B58\u2026");
     const granted = await ensureHostPermission(form.base.value);
     if (!granted) {
-      showStatus("\u672A\u80FD\u83B7\u5F97\u8BE5\u670D\u52A1\u5668\u7684\u8BBF\u95EE\u6388\u6743\uFF08\u53EF\u5728\u6269\u5C55\u8BE6\u60C5\u9875\u201C\u6743\u9650\u201D\u4E2D\u5141\u8BB8\uFF09");
+      showStatus("\u70ED\u95E8\u9608\u503C " + (thresholdPersisted ? "\u5DF2\u4FDD\u5B58" : "\u672A\u80FD\u6301\u4E45\u5316") + "\uFF1B\u672A\u80FD\u83B7\u5F97\u8BE5\u670D\u52A1\u5668\u7684\u8BBF\u95EE\u6388\u6743\uFF08\u53EF\u5728\u6269\u5C55\u8BE6\u60C5\u9875\u201C\u6743\u9650\u201D\u4E2D\u5141\u8BB8\uFF09");
       return;
     }
     const persisted = writeLibrarySettings({
@@ -515,7 +571,7 @@
       password: form.password
     });
     clearLibraryTokens();
-    showStatus(persisted ? "\u8BBE\u7F6E\u5DF2\u4FDD\u5B58" : "\u8BBE\u7F6E\u5DF2\u5E94\u7528\uFF0C\u4F46\u672A\u80FD\u6301\u4E45\u5316");
+    showStatus(persisted ? thresholdPersisted ? "\u5168\u90E8\u8BBE\u7F6E\u5DF2\u4FDD\u5B58" : "\u5185\u5BB9\u5E93\u8BBE\u7F6E\u5DF2\u4FDD\u5B58\uFF0C\u70ED\u95E8\u9608\u503C\u672A\u80FD\u6301\u4E45\u5316" : "\u8BBE\u7F6E\u5DF2\u5E94\u7528\uFF0C\u4F46\u672A\u80FD\u6301\u4E45\u5316");
   }
   async function onClear() {
     const previous = readLibraryConfig();
