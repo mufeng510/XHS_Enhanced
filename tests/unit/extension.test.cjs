@@ -4,12 +4,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const ADDITIONAL_INFO_MAX_CHARACTERS = 50000;
-
-function characterCount(content) {
-  return Array.from(content).length;
-}
-
 function load(pathname = '/real/path', testMode = true, localStorage, extras) {
   class TestBlob {
     constructor(parts = [], opts = {}) {
@@ -45,7 +39,7 @@ function load(pathname = '/real/path', testMode = true, localStorage, extras) {
   if (localStorage !== undefined) context.localStorage = localStorage;
   if (extras) Object.assign(context, extras);
   context.globalThis = context;
-  vm.runInNewContext(fs.readFileSync('xhs-enhanced.user.js', 'utf8'), context);
+  vm.runInNewContext(fs.readFileSync('extension/content.js', 'utf8'), context);
   return context;
 }
 
@@ -75,12 +69,7 @@ test('like parser accepts only explicit supported formats', () => {
   for (const input of ['', '赞', '--', '-1', '1万+', '1.2.3k', '100+']) assert.equal(p(input).ok, false, input);
 });
 
-test('Greasy Fork additional-info HTML stays within the character limit', () => {
-  const html = fs.readFileSync('greasyfork-additional-info.html', 'utf8');
-  assert(characterCount(html) <= ADDITIONAL_INFO_MAX_CHARACTERS);
-  assert.equal(characterCount('a'.repeat(ADDITIONAL_INFO_MAX_CHARACTERS)), ADDITIONAL_INFO_MAX_CHARACTERS);
-  assert(characterCount('a'.repeat(ADDITIONAL_INFO_MAX_CHARACTERS + 1)) > ADDITIONAL_INFO_MAX_CHARACTERS);
-});
+
 
 test('popular threshold accepts canonical non-negative safe integers and safely reads storage', () => {
   const api = load().__XHS_ENHANCED_TEST_API__;
@@ -147,50 +136,6 @@ test('share link uses explore format with xsec_token and xsec_source=pc_feed', (
   assert.equal(api.parseQueryValue('', 'xsec_token'), '');
 });
 
-test('extractTokensFromState reads camelCase xsecToken from real profile note shape', () => {
-  const api = load('/user/profile/abc').__XHS_ENHANCED_TEST_API__;
-  // Mirrors real window.__INITIAL_STATE__ user.notes entries: noteCard.noteId + noteCard.xsecToken,
-  // plus outer entry id + outer xsecToken. Snake_case xsec_token must NOT be required.
-  const snippet = JSON.stringify({
-    user: {
-      notes: [[
-        {
-          id: '69952afa000000001b01e949',
-          noteCard: {
-            noteId: '69952afa000000001b01e949',
-            xsecToken: 'ABD5crNnmvUBtW_SH9ZlB2G3TWHxQqPEKH4irmuIN4ZZs=',
-            type: 'video'
-          },
-          index: 0,
-          exposed: false,
-          ssrRendered: true,
-          xsecToken: 'ABD5crNnmvUBtW_SH9ZlB2G3TWHxQqPEKH4irmuIN4ZZs='
-        },
-        {
-          id: '69971b1c000000001b01d76e',
-          noteCard: {
-            displayTitle: 'title',
-            noteId: '69971b1c000000001b01d76e',
-            xsecToken: 'ABbY2uTCgLbdfHqUw5lq-9g_N4jOS-9ZFuvTexDwEkBvI=',
-            type: 'video'
-          },
-          index: 1,
-          exposed: false,
-          ssrRendered: true,
-          xsecToken: 'ABbY2uTCgLbdfHqUw5lq-9g_N4jOS-9ZFuvTexDwEkBvI='
-        }
-      ]]
-    }
-  });
-  const map = api.extractTokensFromState(snippet);
-  assert.equal(map['69952afa000000001b01e949'], 'ABD5crNnmvUBtW_SH9ZlB2G3TWHxQqPEKH4irmuIN4ZZs=');
-  assert.equal(map['69971b1c000000001b01d76e'], 'ABbY2uTCgLbdfHqUw5lq-9g_N4jOS-9ZFuvTexDwEkBvI=');
-  assert.equal(Object.keys(api.extractTokensFromState('{"xsec_token":"snake"}')).length, 0);
-  assert.equal(
-    api.buildShareLink('69952afa000000001b01e949', map['69952afa000000001b01e949']),
-    'https://www.xiaohongshu.com/explore/69952afa000000001b01e949?xsec_token=ABD5crNnmvUBtW_SH9ZlB2G3TWHxQqPEKH4irmuIN4ZZs%3D&xsec_source=pc_feed'
-  );
-});
 
 test('next popular card selection skips viewport and chooses nearest without mutation', () => {
   const select = load().__XHS_ENHANCED_TEST_API__.selectNextPopularCard;
@@ -297,12 +242,6 @@ test('extractCoverUrl reads first real cover candidate from card images', () => 
   assert.equal(api.extractCoverUrl({ querySelectorAll: () => [] }), '');
 });
 
-test('coverRequestHeaders returns xiaohongshu referer', () => {
-  const api = load('/user/profile/abc').__XHS_ENHANCED_TEST_API__;
-  const headers = api.coverRequestHeaders();
-  assert.equal(headers.Referer, 'https://www.xiaohongshu.com/user/profile/abc');
-  assert.ok(headers.Accept && headers.Accept.indexOf('image/') >= 0);
-});
 
 // Object paths below were verified against ci.xiaohongshu.com; the expected format is
 // recorded in each test because the master is whatever the uploader uploaded.
@@ -402,21 +341,32 @@ test('resolveCoverBlobFromCandidates stops at the first jpeg instead of draining
   const MIME_BY_MARK = { plain: 'image/jpeg', webpmaster: 'image/webp', heicmaster: 'image/heic' };
   function harness() {
     const calls = [];
-    const BlobCtorRef = {};
+    // Magic bytes each mime the fake CDN can answer with.
+    const MAGIC = {
+      'image/jpeg': [0xff, 0xd8, 0xff, 0xe0],
+      'image/webp': [0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50],
+      'image/heic': [0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63],
+      'image/png': [0x89, 0x50, 0x4e, 0x47]
+    };
     const extras = {
-      GM_xmlhttpRequest(opts) {
-        calls.push(opts.url);
-        // Model the real host: '?imageView2/format/jpeg' always answers jpeg, whatever
-        // the master is stored as.
-        const forcedJpeg = /[?&]imageView2\/format\/jpe?g(?:$|[/?&])/i.test(opts.url);
-        const mark = (opts.url.match(/mark-([a-z]+)/) || [])[1] || 'plain';
-        const mime = forcedJpeg ? 'image/jpeg' : (MIME_BY_MARK[mark] || 'image/jpeg');
-        const body = new Uint8Array(64).fill(mark.charCodeAt(0));
-        opts.onload({ status: 200, response: new BlobCtorRef.ctor([body], { type: mime }) });
+      chrome: {
+        runtime: {
+          sendMessage(message) {
+            const url = String(message && message.url || '');
+            calls.push(url);
+            // Model the real host: '?imageView2/format/jpeg' always answers jpeg, whatever
+            // the master is stored as.
+            const forcedJpeg = /[?&]imageView2\/format\/jpe?g(?:$|[/?&])/i.test(url);
+            const mark = (url.match(/mark-([a-z]+)/) || [])[1] || 'plain';
+            const mime = forcedJpeg ? 'image/jpeg' : (MIME_BY_MARK[mark] || 'image/jpeg');
+            const body = new Uint8Array(64);
+            body.set(MAGIC[mime] || MAGIC['image/jpeg'], 0);
+            return Promise.resolve({ ok: true, status: 200, base64: Buffer.from(body).toString('base64'), contentType: mime });
+          }
+        }
       }
     };
     const ctx = load('/search_result', true, undefined, extras);
-    BlobCtorRef.ctor = ctx.Blob;
     return { api: ctx.__XHS_ENHANCED_TEST_API__, calls };
   }
 
@@ -535,9 +485,9 @@ test('findTokenForNoteIdInState early-exits for one note without full walk side 
 test('getFallbackTokenForNoteId caches negative results and stays stable', () => {
   const ctx = load('/user/profile/abc');
   const api = ctx.__XHS_ENHANCED_TEST_API__;
-  ctx.__INITIAL_STATE__ = {
+  api.setTestInitialState({
     user: { notes: [[{ id: 'n1', noteCard: { noteId: 'n1', xsecToken: 'T1' }, xsecToken: 'T1' }]] }
-  };
+  });
   assert.equal(api.getFallbackTokenForNoteId('n1'), 'T1');
   assert.equal(api.getFallbackTokenForNoteId('n1'), 'T1');
   assert.equal(api.getFallbackTokenForNoteId('nope'), '');
@@ -621,4 +571,143 @@ test('readLibraryConfig reads keys safely and normalizes base url', () => {
   }
   assert.equal(api.readLibraryConfig({ getItem: key => key === 'xhs-enhanced:library-base-url' ? 'ftp://bad' : null }).baseUrl, '');
   assert.equal(api.readLibraryConfig({ getItem: key => key === 'xhs-enhanced:library-account-id' ? '-3' : null }).accountId, 0);
+});
+
+test('parseInitialStateFromScriptText parses the serialized state safely', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  assert.equal(typeof api.parseInitialStateFromScriptText, 'function');
+  const good = api.parseInitialStateFromScriptText('window.__INITIAL_STATE__={"user":{"notes":[]},"ok":true};window.__x=1;');
+  assert.equal(JSON.stringify(good), JSON.stringify({ user: { notes: [] }, ok: true }));
+  // undefined literals in the XHS serialization degrade to null instead of throwing
+  const withUndefined = api.parseInitialStateFromScriptText('window.__INITIAL_STATE__={"a":undefined,"b":[1,undefined]}');
+  assert.equal(JSON.stringify(withUndefined), JSON.stringify({ a: null, b: [1, null] }));
+  // string with escapes and braces inside strings must not break the balanced scan
+  const tricky = api.parseInitialStateFromScriptText('window.__INITIAL_STATE__={"t":"a{\\"}b","n":{"deep":[1,{"x":"y"}]}};');
+  assert.equal(tricky.t, 'a{"}b');
+  assert.equal(tricky.n.deep[1].x, 'y');
+  for (const bad of ['', 'window.__INITIAL_STATE__=', 'window.__INITIAL_STATE__={', 'no marker here', 'window.__INITIAL_STATE__=foo()']) {
+    assert.equal(api.parseInitialStateFromScriptText(bad), null, String(bad).slice(0, 40));
+  }
+});
+
+test('chrome.storage.local backs the library settings cache and migrates legacy localStorage keys', async () => {
+  const store = {
+    'xhs-enhanced:library-base-url': 'http://127.0.0.1:8000',
+    'xhs-enhanced:library-username': ' tester ',
+    'xhs-enhanced:library-account-id': '7',
+    'xhs-enhanced:library-password': 'secret123',
+    'xhs-enhanced:library-refresh-token': 'refresh-xyz'
+  };
+  const setCalls = [];
+  const localStorageMock = (() => {
+    const map = new Map([['xhs-enhanced:library-base-url', 'http://legacy:9000'], ['xhs-enhanced:library-username', 'legacy-user']]);
+    return {
+      getItem: key => (map.has(key) ? map.get(key) : null),
+      setItem: (key, value) => map.set(key, String(value)),
+      removeItem: key => map.delete(key)
+    };
+  })();
+  const onChangedListeners = [];
+  const extras = {
+    chrome: {
+      storage: {
+        onChanged: {
+          addListener(listener) { onChangedListeners.push(listener); }
+        },
+        local: {
+          async get(keys) {
+            if (keys == null) return { ...store };
+            const wanted = Array.isArray(keys) ? keys : [keys];
+            const out = {};
+            for (const key of wanted) if (Object.prototype.hasOwnProperty.call(store, key)) out[key] = store[key];
+            return out;
+          },
+          async set(patch) {
+            const changes = {};
+            for (const [key, value] of Object.entries(patch)) {
+              changes[key] = { oldValue: store[key], newValue: value };
+              store[key] = value;
+            }
+            for (const listener of onChangedListeners) listener(changes, 'local');
+            setCalls.push(Object.assign({}, patch));
+          },
+          async remove(keys) { for (const key of [].concat(keys)) delete store[key]; }
+        }
+      }
+    }
+  };
+  const ctx = load('/user/profile/abc', true, localStorageMock, extras);
+  const api = ctx.__XHS_ENHANCED_TEST_API__;
+  await new Promise(resolve => setImmediate(resolve));
+  const cfg = api.readLibraryConfig();
+  // chrome.storage wins; legacy localStorage only fills gaps.
+  assert.equal(cfg.baseUrl, 'http://127.0.0.1:8000');
+  assert.equal(cfg.username, 'tester');
+  assert.equal(cfg.accountId, 7);
+  assert.equal(cfg.password, 'secret123');
+  // A write from another extension context (the options page) is merged live.
+  for (const listener of onChangedListeners) {
+    listener({
+      'xhs-enhanced:library-base-url': { newValue: 'http://10.0.0.9:8000' },
+      'xhs-enhanced:library-username': { newValue: 'other-user' }
+    }, 'local');
+  }
+  const cfg2 = api.readLibraryConfig();
+  assert.equal(cfg2.baseUrl, 'http://10.0.0.9:8000');
+  assert.equal(cfg2.username, 'other-user');
+  // Unrelated areas are ignored.
+  for (const listener of onChangedListeners) {
+    listener({ 'xhs-enhanced:library-base-url': { newValue: 'http://nope:1' } }, 'sync');
+  }
+  assert.equal(api.readLibraryConfig().baseUrl, 'http://10.0.0.9:8000');
+});
+
+test('parseQueryValue tolerates malformed percent-encoding instead of throwing', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  assert.equal(api.parseQueryValue('?xsec_token=%E0%A4%A', 'xsec_token'), '');
+  assert.equal(api.parseQueryValue('?xsec_token=%', 'xsec_token'), '');
+  assert.equal(api.parseQueryValue('?xsec_token=%20ok%20', 'xsec_token'), ' ok ');
+  // Whole-link parse path with a malformed href must not throw either.
+  assert.equal(api.getXsecTokenFromHref('/explore/abc?xsec_token=%E0%A4%A&xsec_source=pc_feed'), '');
+});
+
+test('sniffImageMimeFromBytes distinguishes heic from avif and rejects other mp4 brands', () => {
+  const api = load().__XHS_ENHANCED_TEST_API__;
+  const ftyp = brand => Uint8Array.from([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, ...Array.from(brand).map(c => c.charCodeAt(0))]);
+  assert.equal(api.sniffImageMimeFromBytes(ftyp('heic')), 'image/heic');
+  assert.equal(api.sniffImageMimeFromBytes(ftyp('mif1')), 'image/heic');
+  assert.equal(api.sniffImageMimeFromBytes(ftyp('avif')), 'image/avif');
+  assert.equal(api.sniffImageMimeFromBytes(ftyp('avis')), 'image/avif');
+  assert.equal(api.sniffImageMimeFromBytes(ftyp('mp42')), '');
+  assert.equal(api.sniffImageMimeFromBytes(ftyp('isom')), '');
+});
+
+test('library migration keeps localStorage copies when chrome.storage write fails', async () => {
+  const legacyMap = new Map([['xhs-enhanced:library-base-url', 'http://legacy:9000'], ['xhs-enhanced:library-username', 'legacy-user']]);
+  const localStorageMock = {
+    getItem: key => (legacyMap.has(key) ? legacyMap.get(key) : null),
+    setItem: (key, value) => legacyMap.set(key, String(value)),
+    removeItem: key => legacyMap.delete(key)
+  };
+  const extras = {
+    chrome: {
+      storage: {
+        local: {
+          async get() { return {}; },
+          async set() { throw new Error('quota exceeded'); },
+          async remove() { throw new Error('quota exceeded'); }
+        }
+      }
+    }
+  };
+  const ctx = load('/user/profile/abc', true, localStorageMock, extras);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  // Failed write: legacy keys must still be readable from localStorage.
+  assert.equal(legacyMap.get('xhs-enhanced:library-base-url'), 'http://legacy:9000');
+  assert.equal(legacyMap.get('xhs-enhanced:library-username'), 'legacy-user');
+  // …and the library config falls back to localStorage values.
+  const cfg = ctx.__XHS_ENHANCED_TEST_API__.readLibraryConfig();
+  assert.equal(cfg.baseUrl, 'http://legacy:9000');
+  assert.equal(cfg.username, 'legacy-user');
 });

@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "小红书网页版增强",
+  "version": "2.0.0",
+  "description": "为小红书网页版搜索页/用户主页/首页 feed 高亮热门笔记、快速跳转、只显示热门，并一键保存笔记到自建 XHS_ALL_IN_ONE 内容库。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "小红书网页版增强",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.xiaohongshu.com/search_result*",
+        "https://www.xiaohongshu.com/user/profile/*",
+        "https://www.xiaohongshu.com/explore*",
+        "https://www.xiaohongshu.com/discovery/item/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "storage",
+    "declarativeNetRequestWithHostAccess"
+  ],
+  "host_permissions": [
+    "https://xhscdn.com/*",
+    "https://*.xhscdn.com/*",
+    "https://*.xiaohongshu.com/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "referer-override",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "homepage_url": "https://github.com/mufeng510/XHS_Enhanced"
+}

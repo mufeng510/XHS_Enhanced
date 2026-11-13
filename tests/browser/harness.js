@@ -118,8 +118,15 @@
       try { globalThis.ClipboardItem = FakeClipboardItem; } catch (_) {}
       navigator.clipboard.write = async items => { copiedImages.push(items); return undefined; };
     }
-    // Real XHS profile pages expose camelCase xsecToken on window.__INITIAL_STATE__.user.notes.
-    globalThis.__INITIAL_STATE__ = {
+    // Real XHS profile pages serialize camelCase xsecToken into the inline
+    // __INITIAL_STATE__ script payload; the content script parses it from the DOM.
+    const injectState = state => {
+      const script = document.createElement('script');
+      script.textContent = 'window.__INITIAL_STATE__=' + JSON.stringify(state) + ';';
+      sandbox.appendChild(script);
+      return script;
+    };
+    const stateScript = injectState({
       user: {
         notes: [[{
           id: 'p1',
@@ -137,7 +144,7 @@
           xsecToken: 'stateTokenP3='
         }]]
       }
-    };
+    });
     try {
       card('profile-101').querySelector('.xhs-enhanced-copy-link').click(); await checkpoint();
       assert(copied[copied.length - 1] === 'https://www.xiaohongshu.com/explore/p2?xsec_token=hrefTokenP2&xsec_source=pc_feed', 'copy link prefers xsec_token from card href when present');
@@ -163,7 +170,7 @@
         if (originalWrite) navigator.clipboard.write = originalWrite;
       }
       if (originalClipboardItem) navigator.ClipboardItem = originalClipboardItem;
-      try { delete globalThis.__INITIAL_STATE__; } catch (_) { globalThis.__INITIAL_STATE__ = undefined; }
+      if (stateScript && stateScript.remove) stateScript.remove();
     }
     api.setTestRoute('/search_result'); await checkpoint();
     assert(Boolean(searchCard.querySelector('.xhs-enhanced-save-library')), 'search route keeps card actions with save-to-library button');
@@ -206,48 +213,35 @@
 
   async function librarySync() {
     api.setTestRoute('/user/profile/abc');
-    const storedKeys = {
-      'xhs-enhanced:library-base-url': 'http://127.0.0.1:8000',
-      'xhs-enhanced:library-username': 'tester',
-      'xhs-enhanced:library-account-id': '7',
-      'xhs-enhanced:library-password': 'secret123'
-    };
-    for (const [key, value] of Object.entries(storedKeys)) localStorage.setItem(key, value);
-    const gmCalls = [];
-    let crawlResponse = { status: 200, body: { saved_count: 1, result_count: 1, errors: [], items: [] } };
-    globalThis.GM_xmlhttpRequest = options => {
-      gmCalls.push(options);
-      let payload;
-      if (options.url.endsWith('/api/auth/login')) {
-        payload = { status: 200, responseText: JSON.stringify({ access_token: 'at', refresh_token: 'rt', token_type: 'bearer', user: { id: 1 } }) };
-      } else if (options.url.endsWith('/api/auth/refresh')) {
-        payload = { status: 200, responseText: JSON.stringify({ access_token: 'at2', token_type: 'bearer' }) };
-      } else if (options.url.endsWith('/api/xhs/crawl/note-urls')) {
-        payload = { status: crawlResponse.status, responseText: JSON.stringify(crawlResponse.body) };
-      } else {
-        payload = { status: 404, responseText: '{}' };
-      }
-      setTimeout(() => options.onload(payload), 0);
-    };
-    const crawlOf = () => gmCalls.find(options => options.url === 'http://127.0.0.1:8000/api/xhs/crawl/note-urls');
+    // The chrome.storage.local mock was seeded in harness.html with the four
+    // library keys; __XHSE_LAST_CALLS__ captures every background request.
+    const calls = () => globalThis.__XHSE_LAST_CALLS__ || [];
+    const crawlOf = () => calls().find(options => options.url === 'http://127.0.0.1:8000/api/xhs/crawl/note-urls');
+    globalThis.__XHSE_LAST_CALLS__ = [];
+    globalThis.__XHSE_CRAWL_STATUS__ = 200;
+    globalThis.__XHSE_CRAWL_BODY__ = { saved_count: 1, result_count: 1, errors: [], items: [] };
     try {
       await useFixture('profile-source', '#profile-fixture');
       api.scan(); await checkpoint();
-      // profile-100 resolves its token from window.__INITIAL_STATE__ (its href has none).
-      globalThis.__INITIAL_STATE__ = {
+      // profile-100 resolves its token from the inline __INITIAL_STATE__ payload (its href has none).
+      const stateScript = document.createElement('script');
+      stateScript.textContent = 'window.__INITIAL_STATE__=' + JSON.stringify({
         user: {
           notes: [[{
             id: 'p1',
             noteCard: { noteId: 'p1', xsecToken: 'stateTokenP1=', type: 'video' },
             index: 0, exposed: false, ssrRendered: true, xsecToken: 'stateTokenP1='
-        }]]
+          }]]
         }
-      };
+      }) + ';';
+      stateScript.id = 'xhs-initial-state-test-payload';
+      sandbox.appendChild(stateScript);
+      globalThis.__XHSE_STATE_SCRIPT__ = stateScript;
       const saveButton = card('profile-101').querySelector('.xhs-enhanced-save-library');
       assert(saveButton && saveButton.textContent === '保存入库', 'profile card exposes save-to-library button');
       saveButton.click();
       await checkpoint(); await checkpoint();
-      const loginCall = gmCalls.find(options => options.url.endsWith('/api/auth/login'));
+      const loginCall = calls().find(options => options.url.endsWith('/api/auth/login'));
       assert(Boolean(loginCall) && JSON.parse(loginCall.data).username === 'tester', 'save flow logs in with stored credentials');
       const crawlCall = crawlOf();
       assert(Boolean(crawlCall), 'save flow posts to the crawl endpoint');
@@ -259,26 +253,28 @@
       assert(toast && toast.textContent === '已保存到内容库', 'save success toast');
       assert(card('profile-101').querySelector('.xhs-enhanced-save-library').textContent === '已入库', 'save button flips to done state');
 
-      crawlResponse = { status: 200, body: { saved_count: 0, result_count: 0, errors: [{ url: 'u', error: 'XHS note detail crawl failed' }] } };
-      gmCalls.length = 0;
+      globalThis.__XHSE_CRAWL_STATUS__ = 200;
+      globalThis.__XHSE_CRAWL_BODY__ = { saved_count: 0, result_count: 0, errors: [{ url: 'u', error: 'XHS note detail crawl failed' }] };
+      globalThis.__XHSE_LAST_CALLS__ = [];
       card('profile-100').querySelector('.xhs-enhanced-save-library').click();
       await checkpoint(); await checkpoint();
       assert(document.getElementById('xhs-enhanced-copy-status').textContent.indexOf('采集失败') === 0, 'crawl failure toast shows server error');
 
       // Use the REAL location for the detail-page flow (clearTestRoute restores location routing).
       api.clearTestRoute(); await checkpoint();
-      history.pushState({}, '', '/explore/detail1?xsec_token=tok&xsec_source=pc_search'); await checkpoint();
+      navigate('/explore/detail1?xsec_token=tok&xsec_source=pc_search'); await checkpoint();
       const pageButton = document.getElementById('xhs-enhanced-library-page');
       assert(pageButton && pageButton.textContent === '保存到内容库', 'detail route shows floating save button');
-      crawlResponse = { status: 200, body: { saved_count: 1, result_count: 1, errors: [] } };
-      gmCalls.length = 0;
+      globalThis.__XHSE_CRAWL_STATUS__ = 200;
+      globalThis.__XHSE_CRAWL_BODY__ = { saved_count: 1, result_count: 1, errors: [] };
+      globalThis.__XHSE_LAST_CALLS__ = [];
       pageButton.click();
       await checkpoint(); await checkpoint();
       const detailCall = crawlOf();
       const detailBody = JSON.parse(detailCall.data);
       assert(detailBody.urls.length === 1 && detailBody.urls[0] === location.origin + location.pathname + location.search, 'detail save submits the current page url');
 
-      history.replaceState({}, '', '/search_result'); await checkpoint();
+      navigate('/search_result'); await checkpoint();
       assert(document.getElementById('xhs-enhanced-library-batch'), 'batch save button present on target route');
       assert(!document.getElementById('xhs-enhanced-library-page'), 'detail save button removed on target route');
 
@@ -286,7 +282,7 @@
       const batchB = makeCard('batchb0000000000000000b2', 101); batchB.querySelector('a').href = '/search_result/batchb0000000000000000b2?xsec_token=tb&xsec_source=pc_search';
       sandbox.replaceChildren(batchA, batchB);
       await checkpoint();
-      gmCalls.length = 0;
+      globalThis.__XHSE_LAST_CALLS__ = [];
       document.getElementById('xhs-enhanced-library-batch').click();
       await checkpoint(); await checkpoint();
       const batchBody = JSON.parse(crawlOf().data);
@@ -301,27 +297,37 @@
 
       // Search detail modal URL shows the floating save button.
       api.clearTestRoute(); await checkpoint();
-      history.pushState({}, '', '/search_result/det1?xsec_token=tok&xsec_source=pc_search'); await checkpoint();
+      navigate('/search_result/det1?xsec_token=tok&xsec_source=pc_search'); await checkpoint();
       assert(document.getElementById('xhs-enhanced-library-page'), 'search detail modal shows floating save button');
 
       const toggle = document.getElementById('xhs-enhanced-library-toggle');
-      assert(toggle && toggle.textContent === '内容库设置', 'library settings toggle present');
+      assert(toggle && toggle.textContent === '内容库设置', 'library settings button present');
+      const optionsBefore = globalThis.__XHSE_OPEN_OPTIONS__ || 0;
       toggle.click(); await checkpoint();
-      const panel = document.getElementById('xhs-enhanced-library-panel');
-      assert(panel && panel.classList.contains('xhs-enhanced-library-panel--open'), 'library panel opens');
-      assert(panel.querySelector('#xhs-enhanced-library-base-input').value === 'http://127.0.0.1:8000', 'panel prefills stored base url');
-      assert(panel.querySelector('#xhs-enhanced-library-account-select'), 'panel exposes account select');
-      panel.querySelector('#xhs-enhanced-library-base-input').value = 'not-a-url';
-      panel.querySelector('.xhs-enhanced-library-panel-actions button').click(); await checkpoint();
-      assert(panel.querySelector('#xhs-enhanced-library-status').textContent.indexOf('服务器地址') === 0, 'invalid base url is rejected with guidance');
+      assert((globalThis.__XHSE_OPEN_OPTIONS__ || 0) === optionsBefore + 1, 'library settings button opens the extension options page');
     } finally {
-      delete globalThis.GM_xmlhttpRequest;
-      try { delete globalThis.__INITIAL_STATE__; } catch (_) { globalThis.__INITIAL_STATE__ = undefined; }
-      for (const key of Object.keys(storedKeys)) localStorage.removeItem(key);
-      localStorage.removeItem('xhs-enhanced:library-refresh-token');
-      history.replaceState({}, '', '/search_result');
+      delete globalThis.__XHSE_CRAWL_STATUS__;
+      delete globalThis.__XHSE_CRAWL_BODY__;
+      if (globalThis.__XHSE_STATE_SCRIPT__ && globalThis.__XHSE_STATE_SCRIPT__.remove) { globalThis.__XHSE_STATE_SCRIPT__.remove(); delete globalThis.__XHSE_STATE_SCRIPT__; }
+      // The content library refresh token persists in chrome.storage (mocked); drop it like the old harness did.
+      for (const key of Object.keys(globalThis.__XHS_CHROME_STORE__ || {})) {
+        if (key === 'xhs-enhanced:library-refresh-token') delete globalThis.__XHS_CHROME_STORE__[key];
+      }
+      navigate('/search_result');
       await checkpoint();
     }
+  }
+
+  function navigate(url) {
+    // The content script runs in an isolated world and cannot observe the
+    // page's pushState calls. Real XHS SPA navigation always mutates the DOM
+    // INSIDE the observed content root (the sandbox here); we mirror that
+    // with a throwaway marker so the observer schedules a flush.
+    history.pushState({}, '', url);
+    const marker = document.createElement('span');
+    marker.setAttribute('data-xhs-route-marker', '');
+    sandbox.appendChild(marker);
+    marker.remove();
   }
 
   function makeCard(name, value, attribute = 'aria-label') {
@@ -503,16 +509,14 @@
     const win = frame.contentWindow; const offCard = frame.contentDocument.querySelector('[data-note-card]');
     assert(win.__XHS_ENHANCED_TEST_API__ === undefined, 'test API absent when test mode is off');
     assert(!offCard.classList.contains('xhs-enhanced-card--popular'), 'forged route cannot bypass real file route');
-    const generationOne = history.pushState;
-    const thirdPartyPushState = function (...args) { return generationOne.apply(this, args); };
-    history.pushState = thirdPartyPushState;
+    const originalPushState = history.pushState;
     const originalRaf = globalThis.requestAnimationFrame;
     const queuedRafs = [];
     globalThis.requestAnimationFrame = callback => { queuedRafs.push(callback); return queuedRafs.length; };
     api.scan();
     api.destroy();
     assert(!sandbox.querySelector('.xhs-enhanced-card--popular') && !document.getElementById('xhs-enhanced-style') && !jumpButton() && !prevButton() && !focusToggleNode() && !statusNode(), 'destroy cleans owned state and jump UI');
-    assert(history.pushState === thirdPartyPushState && history.replaceState === globalThis.__XHS_ORIGINAL_HISTORY__.replaceState, 'destroy preserves a third-party History wrapper and restores identity-safe methods');
+    assert(history.pushState === globalThis.__XHS_ORIGINAL_HISTORY__.pushState && history.replaceState === globalThis.__XHS_ORIGINAL_HISTORY__.replaceState, 'destroy leaves history methods untouched');
     api.init();
     const beforeStaleRaf = api.getCounters().batches;
     queuedRafs[0]();
@@ -521,35 +525,36 @@
     assert(api.getCounters().batches === beforeStaleRaf + 1, 'current animation-frame callback flushes exactly once');
     globalThis.requestAnimationFrame = originalRaf;
     api.setTestRoute('/search_result'); api.scan(); await checkpoint();
-    const generationTwo = history.pushState;
-    const beforeGenerationCall = api.getCounters().routeSignals;
-    history.pushState({}, '', '/search_result?generation=2'); await checkpoint();
-    assert(generationTwo !== generationOne && api.getCounters().routeSignals === beforeGenerationCall + 1, 'only current History generation signals through preserved third-party chain');
+    navigate('/search_result?generation=2'); await checkpoint();
     api.destroy();
-    assert(history.pushState === thirdPartyPushState, 'destroying current generation restores preserved third-party wrapper');
-    const beforeInactiveCall = api.getCounters().routeSignals;
-    history.pushState({}, '', '/search_result?inactive-generation=1');
-    assert(api.getCounters().routeSignals === beforeInactiveCall, 'inactive prior History generation remains permanent pass-through');
+    assert(history.pushState === globalThis.__XHS_ORIGINAL_HISTORY__.pushState, 'destroy leaves history methods untouched across lifecycles');
     api.init(); api.setTestRoute('/search_result'); api.scan(); await checkpoint();
-    const pushWrapper = history.pushState; api.init();
-    assert(document.querySelectorAll('#xhs-enhanced-style').length === 1 && document.querySelectorAll('#xhs-enhanced-jump-next').length === 1 && history.pushState === pushWrapper, 're-init creates one idempotent lifecycle');
-    history.replaceState({}, '', '/search_result'); await checkpoint();
+    const pushIdentity = history.pushState; api.init();
+    assert(document.querySelectorAll('#xhs-enhanced-style').length === 1 && document.querySelectorAll('#xhs-enhanced-jump-next').length === 1 && history.pushState === pushIdentity, 're-init creates one idempotent lifecycle');
+    navigate('/search_result'); await checkpoint();
   }
 
   async function productionHistorySignals() {
     api.clearTestRoute(); await checkpoint();
     assert(location.pathname === '/search_result', 'browser harness starts on real supported pathname');
+    // Isolated world: pushState alone is invisible to the content script; the
+    // route change is detected on the DOM mutation + href comparison that a
+    // real SPA navigation produces (mirrored by navigate()).
     const beforePush = api.getCounters().routeSignals;
-    history.pushState({}, '', '/explore/architect-route-test'); await checkpoint();
-    assert(api.getCounters().routeSignals === beforePush + 1 && !jumpButton(), 'pushState produces one route signal and removes UI');
+    navigate('/explore/architect-route-test');
+    await checkpoint();
+    assert(api.getCounters().routeSignals === beforePush + 1 && !jumpButton(), 'SPA-style navigation produces one route signal and removes UI');
     const beforeReplace = api.getCounters().routeSignals;
-    history.replaceState({}, '', '/user/profile/architect-route-test'); await checkpoint();
-    assert(api.getCounters().routeSignals === beforeReplace + 1 && document.querySelectorAll('#xhs-enhanced-jump-next').length === 1, 'replaceState produces one route signal and restores UI');
+    navigate('/user/profile/architect-route-test');
+    await checkpoint();
+    assert(api.getCounters().routeSignals === beforeReplace + 1 && document.querySelectorAll('#xhs-enhanced-jump-next').length === 1, 'back to a target route restores UI without duplication');
     const beforeFailure = api.getCounters().routeSignals;
     let threw = false;
     try { history.pushState({}, '', 'https://example.com/forbidden'); } catch { threw = true; }
-    assert(threw && api.getCounters().routeSignals === beforeFailure, 'failed History call preserves exception and emits no signal');
-    history.replaceState({}, '', '/search_result'); await checkpoint();
+    // A failed History call changes nothing; a DOM mutation must not invent a route signal.
+    await checkpoint();
+    assert(threw && api.getCounters().routeSignals === beforeFailure && location.pathname === '/user/profile/architect-route-test', 'failed History call preserves exception and emits no signal');
+    navigate('/search_result'); await checkpoint();
   }
 
   async function bodyObserverQuiescence() {

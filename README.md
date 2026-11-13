@@ -1,68 +1,95 @@
-# 小红书网页版增强
+# 小红书网页版增强（浏览器扩展）
 
-一个零运行时依赖、单文件的 Tampermonkey 用户脚本，用于在小红书网页版快速识别热门笔记，并可将笔记一键保存到自建的内容库（XHS_ALL_IN_ONE）。
+一个零运行时依赖的 Chrome / Edge 扩展（Manifest V3），用于在小红书网页版快速识别热门笔记，并可将笔记一键保存到自建的内容库（XHS_ALL_IN_ONE）。
+
+> 本项目曾以 Tampermonkey 油猴脚本形式发布（Greasy Fork），现已全面迁移为浏览器扩展。油猴版本已从仓库移除，历史版本见 Git 历史与 Greasy Fork 存档。
 
 ## 功能
 
-- 在搜索结果页和用户主页中，高亮点赞数**严格大于所设阈值**的笔记卡片；
+- 在搜索结果页、用户主页、首页 feed 中，高亮点赞数**严格大于所设阈值**的笔记卡片；
 - 右上角可设置热门阈值，默认 `100`；设置保存在当前浏览器本地，更新后立即重新高亮；
 - 同时高亮卡片内的点赞数；
-- 页面右上角提供“上一条热门笔记 / 下一条热门笔记”悬浮按钮：向下跳过当前可见内容、平滑滚动到下方最近的热门笔记，向上回到上方最近的热门笔记；
-- 到达边界时分别滚动到页面底部/顶部并提示（“已经是最后一条/第一条热门笔记”），后续动态加载热门笔记后仍可继续跳转；
-- **“只显示热门”开关**：开启后，点赞数未达阈值的笔记卡片会模糊虚化（不易看见，鼠标悬浮可暂时看清、卡片按钮仍可用），卡片仍保留占位、不影响布局和小红书懒加载继续加载内容，热门笔记保持清晰高亮；开关状态保存在当前浏览器本地；
-- **笔记卡片悬浮显示“复制链接”“复制封面”“下载封面”“保存入库”按钮**：复制链接写入 `https://www.xiaohongshu.com/explore/<id>?xsec_token=<token>&xsec_source=pc_feed` 格式的分享链接（`xsec_token` 优先取自笔记卡片自身的 `href`，缺失时回退到页面 `window.__INITIAL_STATE__`，均无则使用裸链接）；复制封面将**无水印**笔记封面图片写入剪贴板（自动去掉 CDN `!nd_*` 等处理后缀；通过页面 CORS 或 `GM_xmlhttpRequest` 拉取图片字节；受剪贴板权限限制时给出失败提示，不阻断页面；仅在点击复制时通过油猴请求图片，网络面板里偶发的 blob:chrome-extension:// 条目来自扩展沙箱，不是站点接口）；下载封面把**无水印**的笔记封面原图保存到本地磁盘，复用与复制封面相同的 `GM_xmlhttpRequest` + `Referer` 取图通道，但取图地址改为**原图所在的 `ci.xiaohongshu.com`**，而不是卡片实际渲染的 `sns-webpic-qc` 派生图——后者只提供 `!nd_dft_wlteh_webp_3` 这类强制转 WebP 的处理指令，所以过去无论怎么改候选顺序都只能拿到 WebP。具体做法是从渲染地址里剥掉 `/{时间戳}/{签名}/` 段、保留 `<scene>/<traceId>` 对象键（`notes_pre_post`、`note_pre_post_uhdr` 等 scene 段是键的一部分，丢掉会 404），再按以下顺序取字节：**原图对象 → 服务端 `?imageView2/format/jpeg` 转码 → `sns-img-hw` 镜像 → 原有 `sns-webpic` 链兜底**。小红书存储的原图格式并不统一（实测同为笔记封面就出现过 JPEG、WebP、HEIC、PNG），所以取到的不是 JPEG 时会继续尝试服务端转码；该转码只在原图并非 JPEG 时才用，已经是 JPEG 的原图不会被体积更小的重编码版本覆盖。最后还有一道本地 canvas 兜底（HEIC 无法解码时会保留原字节而不是报错），因此下载到的一律是 `.jpg`，扩展名按**实际字节**判定而非 URL 猜测；代价是原图非 JPEG 时必然经过一次有损重编码，成功或失败都用与其它卡片操作相同的页内 toast 提示；它不经过剪贴板，因此不受剪贴板权限限制影响，剪贴板不可用时仍能拿到封面；
-- 上述“复制链接 / 复制封面 / 下载封面 / 保存入库”四个卡片按钮在**搜索结果页、用户主页、首页 feed**同样可用；搜索结果页的真实卡片会同时渲染封面链接与标题链接、指向同一条笔记，脚本现在能识别这种包含多条同笔记链接的卡片（此前会因不止一个笔记链接被直接跳过，这正是搜索结果页一度看不到卡片按钮的原因）；
-- **一键保存到自建内容库（XHS_ALL_IN_ONE）**（详见下节）：
-  - 笔记卡片悬浮“保存入库”按钮（**首页 feed、搜索结果页、用户主页**均可用），把该笔记的分享链接发送到内容库采集入库；
-  - 笔记详情视图右上角“保存到内容库”浮动按钮，使用当前网页 URL 入库——覆盖 `/explore/<id>`、`/discovery/item/<id>`，以及从搜索结果页/用户主页/首页打开的详情弹窗地址（`/search_result/<id>`、`/user/profile/<用户id>/<笔记id>`）；
-  - 卡片列表页右上角“本页全部入库”按钮，把当前页面已加载的所有笔记链接批量入库（服务端单次上限 50 条，自动分批）；
-  - 右下角“内容库设置”面板：配置服务器地址、用户名、密码，一键“测试连接”并自动发现已绑定的小红书 PC 端账号；
+- 页面右上角提供“上一条热门笔记 / 下一条热门笔记”悬浮按钮；
+- 到达边界时分别滚动到页面底部/顶部并提示，后续动态加载热门笔记后仍可继续跳转；
+- **“只显示热门”开关**：开启后，点赞数未达阈值的笔记卡片模糊虚化（鼠标悬浮可暂时看清、卡片按钮仍可用），卡片仍保留占位、不影响布局和懒加载，热门笔记保持清晰高亮；
+- **笔记卡片悬浮显示“复制链接”“复制封面”“下载封面”“保存入库”按钮**：
+  - 复制链接：写入 `https://www.xiaohongshu.com/explore/<id>?xsec_token=<token>&xsec_source=pc_feed` 格式的分享链接（`xsec_token` 优先取自笔记卡片自身的 `href`，缺失时从页面内联的 `__INITIAL_STATE__` 脚本文本中解析；均无则使用裸链接）；
+  - 复制封面：把**无水印**笔记封面图片写入剪贴板（自动去掉 CDN `!nd_*` 等处理后缀；通过扩展后台服务（具有 CDN host 权限）拉取图片字节，不受页面跨域限制；受剪贴板权限限制时给出失败提示）；
+  - 下载封面：把**无水印**的笔记封面原图保存到本地磁盘。取图地址优先 `ci.xiaohongshu.com` 原图对象（剥掉 `/{时间戳}/{签名}/` 前缀、保留 `<scene>/<traceId>` 对象键），其次服务端 `?imageView2/format/jpeg` 转码、`sns-img-hw` 镜像，最后回退原有 `sns-webpic` 链；非 JPEG 的原图会经本地 canvas 有损重编码为 JPEG（HEIC 无法解码时保留原字节），下载扩展名按实际字节判定；
+  - 四个卡片按钮在**首页 feed、搜索结果页、用户主页**均可用；
+- **一键保存到自建内容库（XHS_ALL_IN_ONE）**：
+  - 笔记卡片悬浮“保存入库”按钮；
+  - 笔记详情视图右上角“保存到内容库”浮动按钮（覆盖 `/explore/<id>`、`/discovery/item/<id>`，以及从搜索结果页/用户主页/首页打开的详情弹窗地址）；
+  - 列表页右上角“本页全部入库”按钮（服务端单次上限 50 条，自动分批）；
+  - 右下角“内容库设置”按钮，打开**扩展选项页**：配置服务器地址、用户名、密码，一键“测试连接”并自动发现已绑定的小红书 PC 端账号；首次连接时扩展会申请该服务器来源的访问授权（仅限你填写的地址）。
 - 自动处理首屏内容、无限滚动新增内容、属性更新和站内 SPA 导航；
 - 不展示或推断笔记发布时间。
 
-## 保存到自建内容库（XHS_ALL_IN_ONE）
+## 隐私
 
-脚本可以把笔记链接发送到你通过 Docker 部署的 [XHS_ALL_IN_ONE](https://github.com/mufeng510/XHS_ALL_IN_ONE)，由服务端采集笔记详情（标题、正文、图片、视频）并保存到内容库。
-
-### 前置条件
-
-1. 已部署 XHS_ALL_IN_ONE（后端默认监听 `8000` 端口），且浏览器可以访问该地址（局域网 IP 或域名）；
-2. 已在 XHS_ALL_IN_ONE 网页端注册用户，并在“平台账号”里**绑定一个小红书 PC 端账号**（采集依赖该账号的 cookie，cookie 失效时需要在平台里更新）。
-
-### 脚本配置步骤
-
-1. 更新脚本后，打开小红书搜索结果页 / 用户主页 / 笔记详情页，点击右下角**“内容库设置”**；
-2. 填写服务器地址（如 `http://192.168.1.10:8000`）、XHS_ALL_IN_ONE 的用户名与密码，点击**“测试连接”**——脚本会自动登录、拉取已绑定的账号列表并选中 PC 端账号（多个账号时可手动选择），最后点击**“保存设置”**；
-3. 之后在任意笔记卡片上点“保存入库”、详情页点“保存到内容库”、或点“本页全部入库”即可。
-
-### 工作方式与说明
-
-- 保存请求通过 `GM_xmlhttpRequest` 直达你的服务器（部署后端默认只允许 localhost 的 CORS 来源，普通页面请求会被拦截，油猴特权通道不受限）；首次请求时 Tampermonkey 会弹窗询问是否允许连接该域名，选择“允许”即可；
-- 发送的链接与“复制链接”一致（含 `xsec_token`），服务端采集必需该 token；token 过期或失效时刷新页面重新获取即可；
-- 登录态自动维护：access token 过期自动用 refresh token 续期（7 天），失效则用保存的账号密码重新登录；
-- 隐私说明：服务器地址/用户名存于页面 localStorage；密码与 refresh token 优先存放在油猴的脚本存储（`GM_setValue`，页面脚本无法读取），仅用于向你自己部署的内容库服务认证，不会发送到任何第三方；
-- 保存失败的提示会透传服务端返回的错误信息（最常见原因是绑定账号的 cookie 失效，或该笔记对绑定账号不可见）。
+- 不收集、不上传任何用户数据，无任何统计/遥测；不使用 `cookies`、`tabs`、`webRequest`、`<all_urls>` 权限；
+- 笔记链接**只**在你主动点击保存时，发送到你在选项页**自己填写的**内容库服务器；
+- 内容库密码与 refresh token 只保存在 `chrome.storage.local`（页面脚本无法读取），且仅用于向你的内容库服务认证；
+- 封面图片字节仅从小红书图片 CDN 读取，仅用于复制/下载到本地；
+- 扩展不申请 `cookies` 权限；后台请求仅发往小红书 CDN / 你的内容库服务器，并会按浏览器策略携带目标站点的 cookie（Referer 由 declarativeNetRequest 规则改写为小红书域，用于 CDN 防盗链校验）；
+- 完整政策见 `store/privacy-policy.md`；权限逐条说明见 `store/permissions.md`。
 
 ## 安装
 
-### 方式一：通过 Greasy Fork 安装（推荐）
-1. 在桌面版 Chrome 或 Edge 中安装 Tampermonkey。
-2. 访问 [Greasy Fork 脚本页面](https://greasyfork.org/zh-CN/scripts/587483) 点击安装。
-3. 打开小红书搜索结果页或用户主页。
+### 方式一：商店安装（审核通过后）
 
-### 方式二：本地安装
-1. 在桌面版 Chrome 或 Edge 中安装 Tampermonkey。
-2. 新建用户脚本，将 [`xhs-enhanced.user.js`](./xhs-enhanced.user.js) 的完整内容粘贴并保存。
-3. 打开小红书搜索结果页、用户主页或笔记详情页。
+- Chrome：Chrome Web Store 搜索“小红书网页版增强”
+- Edge：Edge Add-ons 搜索“小红书网页版增强”
 
-脚本仅匹配：
+### 方式二：从源码加载（开发/体验）
+
+```bash
+npm install
+npm run build     # 生成 extension/ 下的 content.js / options.js / background.js
+```
+
+然后：
+
+1. Chrome（或 Edge）打开 `chrome://extensions`（Edge 为 `edge://extensions`）；
+2. 开启右上角“开发者模式”；
+3. 点击“加载已解压的扩展程序”，选择本仓库的 `extension/` 目录；
+4. 打开小红书搜索结果页、用户主页、首页 feed 或笔记详情页。
+
+### 从油猴脚本迁移
+
+- 热门阈值、“只显示热门”开关保存在小红书域名的 localStorage，升级后**自动沿用**；
+- 内容库的服务器地址、用户名、账号 ID 也保存在 localStorage，扩展首次运行时**自动迁移**到扩展本地存储；
+- 内容库密码与 refresh token 在油猴脚本存储中、扩展无法读取，**需要重新进入选项页填写密码一次**；
+- 建议迁移后移除 Tampermonkey 中的旧脚本，避免重复注入。
+
+## 内容库（XHS_ALL_IN_ONE）配置
+
+前置条件：
+
+1. 已部署 XHS_ALL_IN_ONE（后端默认监听 `8000` 端口），且浏览器可访问该地址（局域网 IP 或域名）；
+2. 已在 XHS_ALL_IN_ONE 网页端注册用户，并在“平台账号”里**绑定一个小红书 PC 端账号**（采集依赖该账号的 cookie）。
+
+步骤：
+
+1. 打开小红书任意页面，点击右下角“内容库设置”，或扩展详情页 →“扩展选项”；
+2. 填写服务器地址（如 `http://192.168.1.10:8000`）、用户名与密码；
+3. 点击“测试连接”——扩展会申请对该服务器的访问授权（仅这一次、仅该来源），随后自动登录、拉取已绑定的账号列表并选中 PC 端账号（多个账号可手动选择）；
+4. 点击“保存设置”，之后即可用“保存入库 / 保存到内容库 / 本页全部入库”。
+
+说明：
+
+- 保存请求由扩展后台服务发出（你的服务器 CORS 白名单只放行 localhost，页面直接 fetch 会被拦截，扩展后台不受限）；
+- access token 过期自动用 refresh token 续期（7 天），失效则用保存的账号密码重新登录；
+- 未授权该服务器时，保存类功能给出提示，其余功能不受影响；
+- token 过期或失效时刷新页面重新获取即可；
+- 保存失败的提示会透传服务端返回的错误信息（最常见原因是绑定账号的 cookie 失效）。
+
+## 匹配范围
 
 - `https://www.xiaohongshu.com/search_result*`
 - `https://www.xiaohongshu.com/user/profile/*`
 - `https://www.xiaohongshu.com/explore*`（首页 feed 与笔记详情页）
 - `https://www.xiaohongshu.com/discovery/item/*`
-
-脚本声明 `@grant GM_xmlhttpRequest`（另申请 `GM_getValue`/`GM_setValue`/`GM_deleteValue` 用于在油猴脚本存储中保存内容库登录凭据），并 `@connect` 小红书图片 CDN 域名；封面读取仅访问 CDN，内容库保存仅访问你在设置里填写的自建服务器；不收集或上传页面数据到任何第三方。
 
 ## 点赞数规则
 
@@ -71,27 +98,47 @@
 - 歧义或无法解析的文本不会高亮；
 - 无法确认笔记卡片或点赞控件时会保守跳过，避免误高亮大容器。
 
-## 相关链接
+## 项目结构
 
-- **GitHub 仓库**：https://github.com/mufeng510/XHS_Enhanced
-- **Greasy Fork 脚本**：https://greasyfork.org/zh-CN/scripts/587483
+```
+extension/            扩展本体（manifest.json + 构建产物，直接可加载）
+  icons/              16/32/48/128 图标
+  rules.json          declarativeNetRequest 规则（为小红书 CDN 请求设置 Referer）
+  options.html|css    扩展选项页（内容库设置）
+src/
+  lib/                纯函数库：pure（解析/路由/封面URL）、settings（存储）、remote（后台代理）、
+                      library（内容库 API）、cover（封面拉取/转码/剪贴板）、initial-state（__INITIAL_STATE__ 解析）、env、text
+  content/index.js    内容脚本入口（高亮/跳转/卡片按钮/观察者）
+  options/options.js  选项页逻辑
+  background/index.js 后台 service worker（特权 fetch 代理）
+tests/
+  unit/               node:test 单测（vm 加载 extension/content.js 与 extension/background.js）
+  browser/            Chrome headless 断言 harness（fixtures + iframe）
+  fixtures/           搜索/主页/动态加载页 fixture
+scripts/              build.cjs、static-check.cjs、run-browser-tests.{sh,ps1}
+store/                上架素材：listing.md、permissions.md、privacy-policy.md、checklist.md、截图
+```
 
 ## 本地验证
 
 ```bash
 npm install
-npm test
+npm test                  # = check + test:unit + test:browser（Windows 走 PowerShell）
 ```
 
-`npm test` 的浏览器环节默认调用 PowerShell 脚本（`scripts/run-browser-tests.ps1`，面向 Windows）。在 Linux / macOS 上改用等价的 POSIX 脚本：
+Linux / macOS：
 
 ```bash
 npm run check && npm run test:unit && npm run test:browser:unix
 ```
 
-两者使用同一套浏览器断言，只有通过全部断言且测试结果恰好写入终端一次才算通过。
+浏览器环节默认调用 `scripts/run-browser-tests.sh`（无头 Chrome），加载 `extension/content.js` 与 chrome.* mock，断言高亮/跳转/复制/保存/生命周期行为。
+
+## 相关链接
+
+- **GitHub 仓库**：https://github.com/mufeng510/XHS_Enhanced
+- 油猴版本（已停止维护）：见仓库 Git 历史与 Greasy Fork 存档
 
 ## 许可证
 
 MIT License
-

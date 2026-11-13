@@ -30,3 +30,6 @@ logs/
 # Other generated files
 coverage/
 *.tsbuildinfo
+
+# Chrome-generated ruleset cache (created at extension load, never ship)
+extension/_metadata/

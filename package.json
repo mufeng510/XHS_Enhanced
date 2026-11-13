@@ -1,8 +1,8 @@
 {
-  "name": "xhs-web-enhancement",
-  "version": "1.9.0",
+  "name": "xhs-enhanced-extension",
+  "version": "2.0.0",
   "private": true,
-  "description": "零依赖油猴脚本 + 本地验证工具链，为小红书网页版搜索页/用户主页增加可配置热门阈值高亮、上/下一条热门笔记快速跳转与只显示热门（模糊非热门）模式，并支持一键保存笔记到自建 XHS_ALL_IN_ONE 内容库",
+  "description": "Chrome/Edge MV3 扩展：为小红书网页版搜索页/用户主页/首页 feed 增加可配置热门阈值高亮、上/下一条热门笔记快速跳转、只显示热门（模糊非热门）模式，笔记卡片按钮（复制链接/复制封面/下载封面/保存入库），并支持一键保存笔记到自建 XHS_ALL_IN_ONE 内容库",
   "repository": {
     "type": "git",
     "url": "https://github.com/mufeng510/XHS_Enhanced.git"
@@ -12,18 +12,23 @@
     "url": "https://github.com/mufeng510/XHS_Enhanced/issues"
   },
   "keywords": [
-    "userscript",
-    "tampermonkey",
+    "extension",
+    "chrome-extension",
+    "edge-extension",
+    "manifest-v3",
     "xiaohongshu",
     "xhs",
-    "userscript",
     "enhancement"
   ],
   "author": "mufeng510",
   "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
   "scripts": {
-    "check": "node scripts/static-check.cjs",
-    "test:unit": "node --test --test-isolation=none tests/unit/userscript.test.cjs",
+    "build": "node scripts/build.cjs",
+    "check": "node scripts/build.cjs && node scripts/static-check.cjs",
+    "test:unit": "node --test --test-isolation=none tests/unit/extension.test.cjs tests/unit/background.test.cjs",
     "test:browser": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-browser-tests.ps1",
     "test:browser:unix": "bash scripts/run-browser-tests.sh",
     "test": "npm run check && npm run test:unit && npm run test:browser"

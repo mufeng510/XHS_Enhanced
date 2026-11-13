@@ -1,0 +1,30 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "referer", "operation": "set", "value": "https://www.xiaohongshu.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "||xhscdn.com",
+      "resourceTypes": ["xmlhttprequest", "image", "media", "other"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "referer", "operation": "set", "value": "https://www.xiaohongshu.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "||ci.xiaohongshu.com",
+      "resourceTypes": ["xmlhttprequest", "image", "media", "other"]
+    }
+  }
+]

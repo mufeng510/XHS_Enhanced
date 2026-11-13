@@ -1,14 +1,75 @@
 <!doctype html>
 <html data-test-result="pending" data-test-terminal-writes="0">
-<head><meta charset="utf-8"><base href="/tests/browser/"><title>XHS Enhanced Browser Harness</title></head>
+<head><meta charset="utf-8"><base href="/tests/browser/"><title>XHS Enhanced Extension Browser Harness</title></head>
 <body>
   <h1>Browser harness</h1><ol id="results"></ol><div id="sandbox-host"><main id="sandbox"></main></div>
   <iframe hidden id="search-source" src="../fixtures/search-page.html"></iframe>
   <iframe hidden id="profile-source" src="../fixtures/profile-page.html"></iframe>
   <iframe hidden id="dynamic-source" src="../fixtures/dynamic-page.html"></iframe>
   <iframe hidden id="off-source" src="test-mode-off.html"></iframe>
-  <script>globalThis.__XHS_ENHANCED_TEST_MODE__=true;globalThis.__XHS_ORIGINAL_HISTORY__={pushState:history.pushState,replaceState:history.replaceState};</script>
-  <script src="../../xhs-enhanced.user.js"></script>
+  <script>
+    // Test-mode boot + chrome.* mock. The seeded library settings mirror what the
+    // options page would persist; content.js warms its cache from this store.
+    globalThis.__XHS_ENHANCED_TEST_MODE__ = true;
+    globalThis.__XHS_ORIGINAL_HISTORY__ = { pushState: history.pushState, replaceState: history.replaceState };
+    globalThis.__XHS_CHROME_STORE__ = {
+      'xhs-enhanced:library-base-url': 'http://127.0.0.1:8000',
+      'xhs-enhanced:library-username': 'tester',
+      'xhs-enhanced:library-account-id': '7',
+      'xhs-enhanced:library-password': 'secret123'
+    };
+    (function () {
+      const store = globalThis.__XHS_CHROME_STORE__;
+      const sendMessage = message => {
+        const url = String((message && message.url) || '');
+        let status = 404;
+        let body = '{}';
+        if (url.endsWith('/api/auth/login')) {
+          status = 200;
+          body = JSON.stringify({ access_token: 'at', refresh_token: 'rt', token_type: 'bearer', user: { id: 1 } });
+        } else if (url.endsWith('/api/auth/refresh')) {
+          status = 200;
+          body = JSON.stringify({ access_token: 'at2', token_type: 'bearer' });
+        } else if (url.endsWith('/api/xhs/crawl/note-urls')) {
+          status = globalThis.__XHSE_CRAWL_STATUS__ || 200;
+          body = JSON.stringify(globalThis.__XHSE_CRAWL_BODY__ || { saved_count: 1, result_count: 1, errors: [], items: [] });
+        } else if (url.endsWith('/api/health')) {
+          status = 200;
+          body = '{"status":"ok"}';
+        }
+        globalThis.__XHSE_LAST_CALLS__ = globalThis.__XHSE_LAST_CALLS__ || [];
+        globalThis.__XHSE_LAST_CALLS__.push(message);
+        return Promise.resolve({ ok: status >= 200 && status < 300, status, text: body, contentType: 'application/json' });
+      };
+      globalThis.chrome = {
+        runtime: {
+          sendMessage,
+          openOptionsPage: () => {
+            globalThis.__XHSE_OPEN_OPTIONS__ = (globalThis.__XHSE_OPEN_OPTIONS__ || 0) + 1;
+            return Promise.resolve();
+          }
+        },
+        storage: {
+          local: {
+            async get(keys) {
+              if (keys == null) return Object.assign({}, store);
+              const wanted = Array.isArray(keys) ? keys : [keys];
+              const out = {};
+              for (const key of wanted) if (Object.prototype.hasOwnProperty.call(store, key)) out[key] = store[key];
+              return out;
+            },
+            async set(patch) { Object.assign(store, patch); },
+            async remove(keys) { for (const key of [].concat(keys)) delete store[key]; }
+          }
+        },
+        permissions: {
+          contains: async () => true,
+          request: async () => true
+        }
+      };
+    }());
+  </script>
+  <script src="../../extension/content.js"></script>
   <script src="harness.js"></script>
 </body>
 </html>

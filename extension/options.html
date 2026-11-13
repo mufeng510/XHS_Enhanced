@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小红书网页版增强 · 设置</title>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<main class="page">
+  <header>
+    <h1>小红书网页版增强</h1>
+    <p class="subtitle">扩展选项 — 内容库（XHS_ALL_IN_ONE）设置</p>
+  </header>
+
+  <section class="card">
+    <h2>内容库连接</h2>
+    <p class="hint">用于把笔记一键保存到你通过 Docker 自建的
+      <a href="https://github.com/mufeng510/XHS_ALL_IN_ONE" target="_blank" rel="noopener">XHS_ALL_IN_ONE</a>
+      内容库。部署后端默认只允许 localhost 的跨域来源，所以保存请求由扩展的后台服务发出，并需要你授予该服务器的访问权限（只在本页点击“测试连接”或“保存”时申请）。</p>
+
+    <label class="field" for="library-base-url">服务器地址</label>
+    <input id="library-base-url" type="url" inputmode="url" placeholder="http://192.168.1.10:8000" autocomplete="off" spellcheck="false">
+    <p id="library-http-warning" class="http-warning" hidden>该地址是明文 http，用户名与密码会以明文传输给服务器。仅建议在可信局域网内使用；如服务器暴露于不受信任的网络，请改用 HTTPS（反向代理/自签证书均可）。</p>
+
+    <label class="field" for="library-username">用户名</label>
+    <input id="library-username" type="text" autocomplete="off" spellcheck="false">
+
+    <label class="field" for="library-password">密码</label>
+    <input id="library-password" type="password" autocomplete="off">
+
+    <label class="field" for="library-account">小红书账号（PC 端）</label>
+    <select id="library-account"></select>
+
+    <div class="actions">
+      <button id="library-test" type="button" class="secondary">测试连接</button>
+      <button id="library-save" type="button" class="primary">保存设置</button>
+      <button id="library-clear" type="button" class="danger">清除设置</button>
+    </div>
+    <p id="library-status" class="status" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="card">
+    <h2>隐私说明</h2>
+    <ul class="notes">
+      <li>服务器地址、用户名、账号 ID、密码与 refresh token 都只保存在扩展的本地存储（chrome.storage.local）中，网页脚本无法读取。</li>
+      <li>笔记链接只会发送到你在此填写的服务器，不会发送到任何第三方。</li>
+      <li>扩展只在小红书网页（xiaohongshu.com）生效；封面读取仅访问小红书图片 CDN。</li>
+      <li>密码保存在浏览器中且会发送到你的服务器用于登录；请只填写你信任的自建实例。</li>
+    </ul>
+  </section>
+
+  <footer>
+    <a href="https://github.com/mufeng510/XHS_Enhanced" target="_blank" rel="noopener">项目与反馈（GitHub）</a>
+  </footer>
+</main>
+<script src="options.js"></script>
+</body>
+</html>
