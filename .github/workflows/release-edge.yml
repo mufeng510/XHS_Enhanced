@@ -67,7 +67,7 @@ jobs:
         run: |
           MANIFEST_VERSION="$(node -p "require('./extension/manifest.json').version")"
           echo "manifest=$MANIFEST_VERSION" >> "$GITHUB_OUTPUT"
-          echo "version=$MANIFEST_VERSION" >> "$GITHUB_ENV"
+          echo "VERSION=$MANIFEST_VERSION" >> "$GITHUB_ENV"
 
       - name: Verify tag/input matches manifest version (release only)
         if: github.event_name == 'release'
