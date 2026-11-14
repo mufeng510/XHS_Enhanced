@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "小红书网页版增强",
-  "version": "2.0.0",
-  "description": "为小红书网页版搜索页/用户主页/首页 feed 高亮热门笔记、快速跳转、只显示热门，并一键保存笔记到自建 XHS_ALL_IN_ONE 内容库。",
+  "version": "2.1.0",
+  "description": "为小红书网页版搜索页/用户主页/首页 feed 高亮热门笔记、快速跳转、只显示热门，并批量下载笔记图片（封面/内图/全部），一键保存笔记到自建 XHS_ALL_IN_ONE 内容库。",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",

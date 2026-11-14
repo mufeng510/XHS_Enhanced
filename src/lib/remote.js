@@ -8,6 +8,9 @@ import { getChrome } from './env.js';
 import { normalizeSpace } from './text.js';
 
 export const FETCH_MESSAGE = 'xhs-enhanced:fetch';
+export const COLLECT_NOTE_VIA_TAB_MESSAGE = 'xhs-enhanced:collect-note-via-tab';
+// SW -> hidden tab: parse your own inline __INITIAL_STATE__ and reply.
+export const COLLECT_NOTE_MESSAGE = 'xhs-enhanced:collect-note';
 
 async function sendToBackground(request) {
   const chrome = getChrome();
@@ -62,6 +65,31 @@ export async function fetchBytes(url, options = {}) {
   const bytes = typeof response.base64 === 'string' ? base64ToBytes(response.base64) : null;
   if (!bytes) return { ok: false, status: Number(response.status) || 0, bytes: null, error: 'decode' };
   return { ok: true, status: Number(response.status) || 0, bytes, contentType: response.contentType || '' };
+}
+
+// HTML/text channel (note detail pages for the batch downloader). Mirrors
+// fetchBytes but returns the response body as a string; the background caps
+// bodies at MAX_BODY_BYTES regardless of the payload type.
+export async function fetchText(url, options = {}) {
+  const timeout = Number(options.timeout) > 0 ? Number(options.timeout) : 30000;
+  const response = await sendToBackground({
+    url,
+    method: options.method || 'GET',
+    headers: options.headers || {},
+    data: options.data,
+    timeout,
+    responseType: 'text'
+  });
+  if (!response) return { ok: false, status: 0, text: '', error: 'network' };
+  if (!response.ok) {
+    return { ok: false, status: Number(response.status) || 0, text: '', error: response.error || 'network' };
+  }
+  return {
+    ok: true,
+    status: Number(response.status) || 200,
+    text: typeof response.text === 'string' ? response.text : '',
+    contentType: response.contentType || ''
+  };
 }
 
 // JSON API channel for the content library. Resolves to

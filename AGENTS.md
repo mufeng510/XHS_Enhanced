@@ -18,6 +18,22 @@ npm install && npm test        # check + unit + browser（Windows=PowerShell run
 npm run build                  # 只打包
 ```
 
+## 批量下载笔记图片（M1/M2，2026-11-14 实测）
+
+需求文档与设计稿：`docs/design-batch-download.md`。在 Feed 卡片注入复选框，底部居中批量栏：`已选 N · 全选已加载 · 连续勾选 · 清空 · 范围(封面|内图|全部) · 下载已选`。
+
+- **内图来源**：SW 直拉详情页 HTML（`fetchText`，`credentials:'include'`，带 cookie）→ 内联 `__INITIAL_STATE__` 解析（`extractNoteFromInitialStateHtml`，balanced scan + 严格→`undefined`→`new Map([])` 渐进降级；**实测 XHS 序列化偶发 `"tailMap":new Map([])`，严格 JSON.parse 会挂**）。失败降级隐藏标签页（`chrome.tabs.create(active:false)` + capture 模式 content script 解析自身 DOM 回传；SW→页 用 `xhs-enhanced:collect-note` 重试轮询，用毕即 `tabs.remove`；**不加 tabs 权限**）。**实测：登录态 SW fetch 直拉一次即中，隐藏标签路径只由单测覆盖。**
+- **视频笔记**：imageList 只有封面（`type='video'`）。scope=inner 时整条笔记跳过并计入 videoSkipped；scope=all 时 01_封面 = 唯一一张。
+- **产物**：单个 zip（内建手写 stored-zip+CRC32 纯函数 `src/lib/zip.js`，零依赖；>200MB 自动按 200MB 分卷 `_partK`）。`XHS笔记_YYYYMMDD_HHmm_<N>篇.zip`，内含 `<001>_<noteId>_<标题截断30>/01_封面.jpg, 02.jpg…`。锚点 object URL 直下（单手势单文件，不受多文件拦截），未加 downloads 权限。
+- **瀑布流**：SelectionStore（Map<noteId> + `chrome.storage.session` 持久化，`src/lib/selection.js`，键 `xhs-enhanced:batch-selected`）；新卡由 renderCard → renderCardChrome 自动补框/回显选中态。「连续勾选」开关打开时新卡自动入选（状态不持久化）。
+- **scope 三态**存 `chrome.storage.local`（`xhs-enhanced:batch-scope`，PREF_KEYS 一并 hydrate/迁移）。两标签页之间不同步（设计如此，KISS）。
+- **组织方式**（选项页「批量下载」卡，`xhs-enhanced:batch-layout`，同样 PREF_KEYS 路径）：`notes`=按笔记建文件夹（默认），`flat`=全部图片平铺单层（`<序号>_<笔记id>_<文件名>`，序号保持下载顺序、noteId 保唯一，无子文件夹）。运行时 `storage.onChanged` 合并进同步缓存，已打开的 feed 页即时生效；打包在 `onBatchDownload` 最后统一定名（`buildFlatEntryName`，见 zip.js）。
+- **实测（Chrome 登录态）**：30 篇封面 → `XHS笔记_....zip` 11MB、全部有效 JPEG；2 篇笔记（1 单图卡 + 12 图 comic）scope=all → 13 个条目全部有效 JPEG 且结构正确；scope=inner → 仅 11 张内图（01..11）且单图笔记自动跳过。**组织方式配置项未在线上验证（用户选择跳过真机），仅 harness+单测覆盖**。
+- **harness mock 增加 `responseType:'text'` 分支**（详情 HTML 夹具，卡面定位 note-detail fixture 逻辑）。测试时序无关。
+- **_metadata**：Chrome 加载扩展会在 `extension/_metadata/` 写运行时缓存（已验证 check 前会失败但恢复后正常）；已被 .gitignore 覆盖，发布前务必删（static-check 会再断言）。
+- 单测 `tests/unit/zip.test.cjs` + `note-detail.test.cjs`；harness 增加 `batchSelectionAndDownload` / `batchScopeModeAndInnerImages` 两个用例块。
+- **`fetchBytes` 硬编码 `responseType:'arraybuffer'`**：取 HTML 必须用 `fetchText`（`remote.js` 新增）或传 URL 精确命中 mock 的库 JSON。
+
 ## 架构要点 / 坑
 
 - **特权网络通道**：content script 页面 fetch 会被内容库服务器 CORS 拦截 → 所有跨域请求走 `src/background/index.js`（host_permissions 静态涵盖 `*.xhscdn.com`、`*.xiaohongshu.com`；内容库服务器地址 = optional_host_permissions，运行时由选项页按来源、用户手势授权）。后台静态门仅放行 `*.xhscdn.com` 与 `ci.xiaohongshu.com` 且仅 GET/HEAD。

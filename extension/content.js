@@ -165,11 +165,18 @@
     try {
       return JSON.parse(jsonText);
     } catch (_) {
-      try {
-        return JSON.parse(jsonText.replace(/\bundefined\b/g, "null"));
-      } catch (__) {
-        return null;
+      const fixes = [
+        (value) => value.replace(/\bundefined\b/g, "null"),
+        (value) => value.replace(/\bundefined\b/g, "null").replace(/\bnew\s+(?:Map|Set)\(\s*\[\s*\]\s*\)/g, "null"),
+        (value) => value.replace(/\bundefined\b/g, "null").replace(/\bnew\s+(?:Map|Set)\(\s*\[[\s\S]*?\]\s*\)/g, "null")
+      ];
+      for (const fix of fixes) {
+        try {
+          return JSON.parse(fix(jsonText));
+        } catch (__) {
+        }
       }
+      return null;
     }
   }
   function scanBalancedObject(source, start) {
@@ -200,6 +207,77 @@
       }
     }
     return -1;
+  }
+  function slimNoteDetail(note) {
+    const value = note && typeof note === "object" ? note : null;
+    if (!value) return null;
+    const rawList = Array.isArray(value.imageList) ? value.imageList : [];
+    const imageList = [];
+    for (const item of rawList) {
+      if (!item || typeof item !== "object") continue;
+      const infoList = [];
+      if (Array.isArray(item.infoList)) {
+        for (const entry of item.infoList) {
+          if (!entry || typeof entry !== "object") continue;
+          const url = String(entry.url || "");
+          if (!url) continue;
+          infoList.push({ imageScene: String(entry.imageScene || ""), url });
+        }
+      }
+      imageList.push({
+        urlDefault: String(item.urlDefault || ""),
+        urlPre: String(item.urlPre || ""),
+        width: Number(item.width) || 0,
+        height: Number(item.height) || 0,
+        infoList
+      });
+    }
+    return {
+      title: String(value.title || ""),
+      type: String(value.type || ""),
+      imageList
+    };
+  }
+  var BATCH_LAYOUT_VALUES = Object.freeze(["notes", "flat"]);
+  function normalizeBatchLayout(value) {
+    const text = String(value == null ? "" : value).trim().toLowerCase();
+    return text === "flat" ? "flat" : "notes";
+  }
+  var BATCH_SCOPE_VALUES = Object.freeze(["cover", "inner", "all"]);
+  function normalizeBatchScope(value) {
+    const text = String(value == null ? "" : value).trim().toLowerCase();
+    return text === "cover" || text === "inner" ? text : "all";
+  }
+  function extractNoteFromInitialStateHtml(htmlText) {
+    const text = String(htmlText == null ? "" : htmlText);
+    const marker = "__INITIAL_STATE__=";
+    const anchor = text.indexOf(marker);
+    if (anchor < 0) return null;
+    const scriptStart = text.lastIndexOf("<script", anchor);
+    const scriptEnd = text.indexOf("<\/script>", anchor);
+    if (scriptStart < 0 || scriptEnd < 0) return null;
+    const openTagEnd = text.indexOf(">", scriptStart);
+    if (openTagEnd < 0 || openTagEnd >= scriptEnd) return null;
+    const scriptText = text.slice(openTagEnd + 1, scriptEnd);
+    const state = parseInitialStateFromScriptText(scriptText);
+    const noteMap = state && state.note && state.note.noteDetailMap;
+    if (!noteMap || typeof noteMap !== "object") return null;
+    const first = Object.values(noteMap)[0];
+    const note = first && first.note;
+    return slimNoteDetail(note);
+  }
+  function pickBestImageUrl(image) {
+    if (!image || typeof image !== "object") return "";
+    const direct = String(image.urlDefault || "").trim() || String(image.urlPre || "").trim();
+    if (direct) return direct;
+    const list = Array.isArray(image.infoList) ? image.infoList : [];
+    const preferred = ["WB_DFT", "WB_PRV", "WB_BIG"];
+    for (const scene of preferred) {
+      const hit = list.find((entry) => entry && String(entry.imageScene || "").toUpperCase() === scene && entry.url);
+      if (hit) return String(hit.url).trim();
+    }
+    const any = list.find((entry) => entry && entry.url);
+    return any ? String(any.url).trim() : "";
   }
   function buildShareLink(id, token) {
     if (!id) return "";
@@ -390,6 +468,8 @@
   var LIBRARY_REFRESH_KEY = "xhs-enhanced:library-refresh-token";
   var THRESHOLD_KEY = "xhs-enhanced:popular-threshold";
   var FOCUS_KEY = "xhs-enhanced:focus-popular";
+  var BATCH_SCOPE_KEY = "xhs-enhanced:batch-scope";
+  var BATCH_LAYOUT_KEY = "xhs-enhanced:batch-layout";
   var LIBRARY_KEYS = Object.freeze([
     LIBRARY_BASE_URL_KEY,
     LIBRARY_USERNAME_KEY,
@@ -397,7 +477,7 @@
     LIBRARY_PASSWORD_KEY,
     LIBRARY_REFRESH_KEY
   ]);
-  var PREF_KEYS = Object.freeze([THRESHOLD_KEY, FOCUS_KEY]);
+  var PREF_KEYS = Object.freeze([THRESHOLD_KEY, FOCUS_KEY, BATCH_SCOPE_KEY, BATCH_LAYOUT_KEY]);
   var STORAGE_KEYS = Object.freeze(LIBRARY_KEYS.concat(PREF_KEYS));
   function chromeStorage() {
     const chrome = getChrome();
@@ -417,6 +497,8 @@
   var libraryHydrated = false;
   var thresholdCache = DEFAULT_THRESHOLD;
   var focusCache = false;
+  var batchScopeCache = "all";
+  var batchLayoutCache = "notes";
   function parseThresholdSafe(value) {
     if (value == null) return DEFAULT_THRESHOLD;
     const parsed = parseThreshold(String(value));
@@ -487,6 +569,8 @@
           else if (key === LIBRARY_REFRESH_KEY) libraryCache.refreshToken = value == null ? "" : String(value);
           else if (key === THRESHOLD_KEY) thresholdCache = parseThresholdSafe(value);
           else if (key === FOCUS_KEY) focusCache = value === true || value === "1";
+          else if (key === BATCH_SCOPE_KEY) batchScopeCache = normalizeBatchScope(value);
+          else if (key === BATCH_LAYOUT_KEY) batchLayoutCache = normalizeBatchLayout(value);
         }
       });
     } catch (_) {
@@ -505,6 +589,8 @@
       });
       thresholdCache = parseThresholdSafe(readLocal(THRESHOLD_KEY));
       focusCache = readLocal(FOCUS_KEY) === "1";
+      batchScopeCache = normalizeBatchScope(readLocal(BATCH_SCOPE_KEY));
+      batchLayoutCache = normalizeBatchLayout(readLocal(BATCH_LAYOUT_KEY));
       libraryHydrated = true;
       return;
     }
@@ -517,6 +603,8 @@
     applyLibraryItems(items);
     thresholdCache = parseThresholdSafe(items[THRESHOLD_KEY]);
     focusCache = items[FOCUS_KEY] === true || items[FOCUS_KEY] === "1";
+    batchScopeCache = normalizeBatchScope(items[BATCH_SCOPE_KEY]);
+    batchLayoutCache = normalizeBatchLayout(items[BATCH_LAYOUT_KEY]);
     const legacy = migrateLegacyLocalStorage();
     for (const key of PREF_KEYS) {
       if (items[key] == null && readLocal(key)) legacy.push([key, readLocal(key)]);
@@ -531,6 +619,8 @@
           if (key === LIBRARY_ACCOUNT_ID_KEY) libraryCache.accountId = Number(value) || 0;
           if (key === THRESHOLD_KEY) thresholdCache = parseThresholdSafe(value);
           if (key === FOCUS_KEY) focusCache = value === "1";
+          if (key === BATCH_SCOPE_KEY) batchScopeCache = normalizeBatchScope(value);
+          if (key === BATCH_LAYOUT_KEY) batchLayoutCache = normalizeBatchLayout(value);
         }
       }
       if (Object.keys(patch).length) {
@@ -651,9 +741,41 @@
     focusCache = Boolean(value);
     return { ok: true, value: focusCache, persisted: persistLibrary({ [FOCUS_KEY]: focusCache ? "1" : "0" }) };
   }
+  function readStoredBatchScope(storage) {
+    if (storage !== void 0) {
+      if (!storage) return "all";
+      try {
+        return normalizeBatchScope(storage.getItem(BATCH_SCOPE_KEY));
+      } catch (_) {
+        return "all";
+      }
+    }
+    return batchScopeCache;
+  }
+  function writeStoredBatchScope(value) {
+    batchScopeCache = normalizeBatchScope(value);
+    return { ok: true, value: batchScopeCache, persisted: persistLibrary({ [BATCH_SCOPE_KEY]: batchScopeCache }) };
+  }
+  function readStoredBatchLayout(storage) {
+    if (storage !== void 0) {
+      if (!storage) return "notes";
+      try {
+        return normalizeBatchLayout(storage.getItem(BATCH_LAYOUT_KEY));
+      } catch (_) {
+        return "notes";
+      }
+    }
+    return batchLayoutCache;
+  }
+  function writeStoredBatchLayout(value) {
+    batchLayoutCache = normalizeBatchLayout(value);
+    return { ok: true, value: batchLayoutCache, persisted: persistLibrary({ [BATCH_LAYOUT_KEY]: batchLayoutCache }) };
+  }
 
   // src/lib/remote.js
   var FETCH_MESSAGE = "xhs-enhanced:fetch";
+  var COLLECT_NOTE_VIA_TAB_MESSAGE = "xhs-enhanced:collect-note-via-tab";
+  var COLLECT_NOTE_MESSAGE = "xhs-enhanced:collect-note";
   async function sendToBackground(request) {
     const chrome = getChrome();
     if (!chrome || !chrome.runtime || typeof chrome.runtime.sendMessage !== "function") {
@@ -700,6 +822,27 @@
     const bytes = typeof response.base64 === "string" ? base64ToBytes(response.base64) : null;
     if (!bytes) return { ok: false, status: Number(response.status) || 0, bytes: null, error: "decode" };
     return { ok: true, status: Number(response.status) || 0, bytes, contentType: response.contentType || "" };
+  }
+  async function fetchText(url, options = {}) {
+    const timeout = Number(options.timeout) > 0 ? Number(options.timeout) : 3e4;
+    const response = await sendToBackground({
+      url,
+      method: options.method || "GET",
+      headers: options.headers || {},
+      data: options.data,
+      timeout,
+      responseType: "text"
+    });
+    if (!response) return { ok: false, status: 0, text: "", error: "network" };
+    if (!response.ok) {
+      return { ok: false, status: Number(response.status) || 0, text: "", error: response.error || "network" };
+    }
+    return {
+      ok: true,
+      status: Number(response.status) || 200,
+      text: typeof response.text === "string" ? response.text : "",
+      contentType: response.contentType || ""
+    };
   }
   async function fetchJson(urlOrOptions, maybeOptions) {
     const options = typeof urlOrOptions === "string" ? { ...maybeOptions || {}, url: urlOrOptions } : urlOrOptions || {};
@@ -1201,6 +1344,299 @@
     }
   }
 
+  // src/lib/zip.js
+  var MAX_ZIP_BYTES = 200 * 1024 * 1024;
+  var LOCAL_HEADER_SIGNATURE = 67324752;
+  var CENTRAL_SIGNATURE = 33639248;
+  var EOCD_SIGNATURE = 101010256;
+  var VERSION_NEEDED = 20;
+  var FLAG_UTF8 = 2048;
+  var METHOD_STORED = 0;
+  var CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let n = 0; n < 256; n += 1) {
+      let c = n;
+      for (let k = 0; k < 8; k += 1) {
+        c = c & 1 ? (3988292384 ^ c >>> 1) >>> 0 : c >>> 1;
+      }
+      table[n] = c >>> 0;
+    }
+    return table;
+  })();
+  function crc32(bytes) {
+    const buf = bytes || new Uint8Array(0);
+    let c = 4294967295;
+    for (let i = 0; i < buf.length; i += 1) {
+      c = CRC_TABLE[(c ^ buf[i]) & 255] ^ c >>> 8;
+    }
+    return (c ^ 4294967295) >>> 0;
+  }
+  function sanitizeFileName(value, fallback = "untitled", maxLength = 40) {
+    const text = String(value == null ? "" : value);
+    const cleaned = text.replace(/[<>:"/\\|?*]/g, " ").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").replace(/^[\s.]+/g, "").replace(/[\s.]+$/g, "").trim();
+    let name = cleaned;
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(name)) name = "_" + name;
+    const chars = Array.from(name);
+    if (chars.length > maxLength) name = chars.slice(0, maxLength).join("");
+    name = name.replace(/[\s.]+$/g, "");
+    return name || fallback;
+  }
+  function pad2(value) {
+    return String(value).padStart(2, "0");
+  }
+  function asValidDate(value) {
+    const time = value && typeof value.getTime === "function" ? value.getTime() : NaN;
+    return Number.isFinite(time) ? new Date(time) : /* @__PURE__ */ new Date();
+  }
+  function buildBatchZipFileName(now, count, partIndex = 0, partTotal = 1) {
+    const date = asValidDate(now);
+    const stamp = String(date.getFullYear()) + pad2(date.getMonth() + 1) + pad2(date.getDate()) + "_" + pad2(date.getHours()) + pad2(date.getMinutes());
+    const base = `XHS\u7B14\u8BB0_${stamp}_${Number(count) || 0}\u7BC7`;
+    return partTotal > 1 ? `${base}_part${partIndex + 1}.zip` : `${base}.zip`;
+  }
+  function buildNoteFolderName(index, noteId, title) {
+    const seq = String((Number(index) || 0) + 1).padStart(3, "0");
+    const id = sanitizeFileName(noteId, "note");
+    const suffix = sanitizeFileName(title, "", 30);
+    return suffix ? `${seq}_${id}_${suffix}` : `${seq}_${id}`;
+  }
+  function buildFlatEntryName(index, noteId, fileName) {
+    const seq = String((Number(index) || 0) + 1).padStart(3, "0");
+    const id = sanitizeFileName(noteId, "note");
+    const file = sanitizeFileName(String(fileName || "image.jpg").replace(/^\/+/, ""), "image.jpg", 120);
+    return `${seq}_${id}_${file}`;
+  }
+  function buildImageFileName(order, ext, isCover = false) {
+    const seq = pad2((Number(order) || 0) + 1);
+    const safeExt = sanitizeFileName(String(ext || "jpg").replace(/^\.+/, ""), "jpg", 8).toLowerCase();
+    return `${seq}${isCover ? "_\u5C01\u9762" : ""}.${safeExt}`;
+  }
+  function splitZipEntries(entries, maxBytes = MAX_ZIP_BYTES) {
+    const limit = Number(maxBytes) > 0 ? Number(maxBytes) : MAX_ZIP_BYTES;
+    const list = Array.isArray(entries) ? entries : [];
+    const parts = [];
+    let current = [];
+    let currentBytes = 0;
+    for (const entry of list) {
+      const size = entry && entry.bytes ? entry.bytes.length : 0;
+      if (current.length && currentBytes + size > limit) {
+        parts.push(current);
+        current = [];
+        currentBytes = 0;
+      }
+      current.push(entry);
+      currentBytes += size;
+    }
+    if (current.length) parts.push(current);
+    return parts;
+  }
+  function dosDateTime(date) {
+    const d = asValidDate(date);
+    const year = Math.max(1980, d.getFullYear());
+    const time = (d.getHours() & 31) << 11 | (d.getMinutes() & 63) << 5 | d.getSeconds() >>> 1 & 31;
+    const day = (year - 1980 & 127) << 9 | (d.getMonth() + 1 & 15) << 5 | d.getDate() & 31;
+    return { time, day };
+  }
+  function encodeName(name) {
+    const value = String(name == null ? "" : name).replace(/\\/g, "/");
+    return new TextEncoder().encode(value);
+  }
+  function buildZip(entries, options = {}) {
+    const list = Array.isArray(entries) ? entries : [];
+    const { time, day } = dosDateTime(options.now);
+    const prepared = list.map((entry) => {
+      const nameBytes = encodeName(entry && entry.name);
+      const data = entry && entry.bytes instanceof Uint8Array ? entry.bytes : entry && entry.bytes ? new Uint8Array(entry.bytes) : new Uint8Array(0);
+      return { nameBytes, data, crc: crc32(data), size: data.length };
+    });
+    let offset = 0;
+    let centralBytes = 0;
+    for (const item of prepared) {
+      item.localOffset = offset;
+      offset += 30 + item.nameBytes.length + item.size;
+      if (offset > 4294967295) throw new RangeError("zip-too-large");
+      centralBytes += 46 + item.nameBytes.length;
+    }
+    const eocdBytes = 22;
+    const total = offset + centralBytes + eocdBytes;
+    const out = new Uint8Array(total);
+    const view = new DataView(out.buffer);
+    let cursor = 0;
+    for (const item of prepared) {
+      view.setUint32(cursor, LOCAL_HEADER_SIGNATURE, true);
+      view.setUint16(cursor + 4, VERSION_NEEDED, true);
+      view.setUint16(cursor + 6, FLAG_UTF8, true);
+      view.setUint16(cursor + 8, METHOD_STORED, true);
+      view.setUint16(cursor + 10, time, true);
+      view.setUint16(cursor + 12, day, true);
+      view.setUint32(cursor + 14, item.crc, true);
+      view.setUint32(cursor + 18, item.size, true);
+      view.setUint32(cursor + 22, item.size, true);
+      view.setUint16(cursor + 26, item.nameBytes.length, true);
+      view.setUint16(cursor + 28, 0, true);
+      cursor += 30;
+      out.set(item.nameBytes, cursor);
+      cursor += item.nameBytes.length;
+      out.set(item.data, cursor);
+      cursor += item.size;
+    }
+    const centralStart = cursor;
+    for (const item of prepared) {
+      view.setUint32(cursor, CENTRAL_SIGNATURE, true);
+      view.setUint16(cursor + 4, VERSION_NEEDED, true);
+      view.setUint16(cursor + 6, VERSION_NEEDED, true);
+      view.setUint16(cursor + 8, FLAG_UTF8, true);
+      view.setUint16(cursor + 10, METHOD_STORED, true);
+      view.setUint16(cursor + 12, time, true);
+      view.setUint16(cursor + 14, day, true);
+      view.setUint32(cursor + 16, item.crc, true);
+      view.setUint32(cursor + 20, item.size, true);
+      view.setUint32(cursor + 24, item.size, true);
+      view.setUint16(cursor + 28, item.nameBytes.length, true);
+      view.setUint16(cursor + 30, 0, true);
+      view.setUint16(cursor + 32, 0, true);
+      view.setUint16(cursor + 34, 0, true);
+      view.setUint16(cursor + 36, 0, true);
+      view.setUint32(cursor + 38, 0, true);
+      view.setUint32(cursor + 42, item.localOffset, true);
+      cursor += 46;
+      out.set(item.nameBytes, cursor);
+      cursor += item.nameBytes.length;
+    }
+    view.setUint32(cursor, EOCD_SIGNATURE, true);
+    view.setUint16(cursor + 4, 0, true);
+    view.setUint16(cursor + 6, 0, true);
+    view.setUint16(cursor + 8, prepared.length, true);
+    view.setUint16(cursor + 10, prepared.length, true);
+    view.setUint32(cursor + 12, centralBytes, true);
+    view.setUint32(cursor + 16, centralStart, true);
+    view.setUint16(cursor + 20, 0, true);
+    return out;
+  }
+
+  // src/lib/selection.js
+  var SELECTION_STORAGE_KEY = "xhs-enhanced:batch-selected";
+  function validateSnapshot(entry) {
+    if (!entry || typeof entry !== "object") return null;
+    const id = String(entry.id || "").trim();
+    if (!id) return null;
+    return {
+      id,
+      link: String(entry.link || ""),
+      coverUrl: String(entry.coverUrl || ""),
+      title: String(entry.title || ""),
+      ts: Number(entry.ts) || Date.now()
+    };
+  }
+  function createSelectionStore(storage) {
+    const map = /* @__PURE__ */ new Map();
+    let hydrated = false;
+    let hydratePromise = null;
+    let persistTimer = null;
+    async function hydrate2() {
+      if (hydrated) return map.size;
+      if (hydratePromise) return hydratePromise;
+      hydratePromise = (async () => {
+        try {
+          if (storage && typeof storage.get === "function") {
+            const items = await storage.get(SELECTION_STORAGE_KEY);
+            const list = items && items[SELECTION_STORAGE_KEY];
+            if (Array.isArray(list)) {
+              for (const raw of list) {
+                const value = validateSnapshot(raw);
+                if (value && !map.has(value.id)) map.set(value.id, value);
+              }
+            }
+          }
+        } catch (_) {
+        }
+        hydrated = true;
+        return map.size;
+      })();
+      return hydratePromise;
+    }
+    function payload() {
+      return { [SELECTION_STORAGE_KEY]: Array.from(map.values()) };
+    }
+    function persistNow() {
+      if (!storage || typeof storage.set !== "function") return Promise.resolve(false);
+      try {
+        return Promise.resolve(storage.set(payload())).then(() => true, () => false);
+      } catch (_) {
+        return Promise.resolve(false);
+      }
+    }
+    function clearPending() {
+      if (persistTimer !== null && typeof globalThis.clearTimeout === "function") {
+        globalThis.clearTimeout(persistTimer);
+      }
+      persistTimer = null;
+    }
+    function schedulePersist() {
+      if (!storage) return;
+      clearPending();
+      if (typeof globalThis.setTimeout !== "function") {
+        persistNow();
+        return;
+      }
+      persistTimer = globalThis.setTimeout(() => {
+        persistTimer = null;
+        persistNow();
+      }, 300);
+    }
+    return Object.freeze({
+      get size() {
+        return map.size;
+      },
+      hydrate: hydrate2,
+      flush: persistNow,
+      has(id) {
+        return map.has(String(id || ""));
+      },
+      get(id) {
+        return map.get(String(id || "")) || null;
+      },
+      values() {
+        return Array.from(map.values());
+      },
+      ids() {
+        return Array.from(map.keys());
+      },
+      add(item) {
+        const value = validateSnapshot(item);
+        if (!value) return false;
+        const isNew = !map.has(value.id);
+        map.set(value.id, value);
+        schedulePersist();
+        return isNew;
+      },
+      remove(id) {
+        const had = map.delete(String(id || ""));
+        if (had) schedulePersist();
+        return had;
+      },
+      toggle(item) {
+        const value = validateSnapshot(item);
+        if (!value) return null;
+        if (map.has(value.id)) {
+          map.delete(value.id);
+          schedulePersist();
+          return false;
+        }
+        map.set(value.id, value);
+        schedulePersist();
+        return true;
+      },
+      clear() {
+        if (!map.size) return false;
+        map.clear();
+        clearPending();
+        persistNow();
+        return true;
+      }
+    });
+  }
+
   // src/content/index.js
   var ROOT = getRoot();
   var TEST_MODE = isTestMode();
@@ -1256,6 +1692,33 @@
   var LIBRARY_CONNECT_FAIL = "\u65E0\u6CD5\u8FDE\u63A5\u5185\u5BB9\u5E93\u670D\u52A1";
   var LIBRARY_CHANNEL_MISSING = "\u6269\u5C55\u65E0\u6CD5\u8BBF\u95EE\u5185\u5BB9\u5E93\uFF08\u8BF7\u91CD\u65B0\u52A0\u8F7D\u6269\u5C55\u540E\u518D\u8BD5\uFF09";
   var LIBRARY_PERMISSION_MISSING = "\u5185\u5BB9\u5E93\u670D\u52A1\u5668\u672A\u6388\u6743\uFF1A\u6253\u5F00\u6269\u5C55\u9009\u9879\u9875\u70B9\u201C\u6D4B\u8BD5\u8FDE\u63A5\u201D\u5E76\u5141\u8BB8\u8BBF\u95EE\u8BE5\u5730\u5740";
+  var BATCH_BAR_ID = "xhs-enhanced-batch-bar";
+  var BATCH_COUNT_ID = "xhs-enhanced-batch-count";
+  var BATCH_SELECT_LOADED_ID = "xhs-enhanced-batch-select-loaded";
+  var BATCH_CONTINUOUS_ID = "xhs-enhanced-batch-continuous";
+  var BATCH_CLEAR_ID = "xhs-enhanced-batch-clear";
+  var BATCH_DOWNLOAD_ID = "xhs-enhanced-batch-download";
+  var CHECKBOX_CLASS = "xhs-enhanced-checkbox";
+  var CHECKBOX_CHECKED_TEXT = "\u2713";
+  var BATCH_EMPTY_TEXT = "\u8BF7\u5148\u52FE\u9009\u7B14\u8BB0";
+  var BATCH_NO_COVER_TEXT = "\u6CA1\u6709\u53EF\u4E0B\u8F7D\u7684\u5C01\u9762";
+  var BATCH_CONTINUOUS_ON_TEXT = "\u5DF2\u5F00\u542F\u8FDE\u7EED\u52FE\u9009\uFF1A\u6EDA\u52A8\u52A0\u8F7D\u7684\u65B0\u7B14\u8BB0\u4F1A\u81EA\u52A8\u52FE\u9009";
+  var BATCH_CONTINUOUS_OFF_TEXT = "\u5DF2\u5173\u95ED\u8FDE\u7EED\u52FE\u9009";
+  var BATCH_CLEARED_TEXT = "\u5DF2\u6E05\u7A7A\u52FE\u9009";
+  var BATCH_SELECT_ALL_ON_TEXT = (count) => "\u5DF2\u52FE\u9009\u5DF2\u52A0\u8F7D\u7684 " + count + " \u7BC7\u7B14\u8BB0";
+  var BATCH_SELECT_ALL_OFF_TEXT = "\u5DF2\u53D6\u6D88\u5DF2\u52A0\u8F7D\u7B14\u8BB0\u7684\u52FE\u9009";
+  var BATCH_NO_LOADED_TEXT = "\u672C\u9875\u6CA1\u6709\u53EF\u52FE\u9009\u7684\u7B14\u8BB0";
+  var BATCH_DOWNLOAD_START_TEXT = (count) => "\u6B63\u5728\u51C6\u5907 " + count + " \u7BC7\u7B14\u8BB0\u2026";
+  var BATCH_DOWNLOAD_FETCHING_TEXT = (done, total) => "\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + " \u7BC7\u2026";
+  var BATCH_DOWNLOAD_PACKING_TEXT = (count) => "\u6B63\u5728\u6253\u5305 " + count + " \u5F20\u56FE\u7247\u2026";
+  var BATCH_DOWNLOAD_DONE_TEXT = (summary) => "\u5DF2\u4E0B\u8F7D " + summary.saved + " \u5F20\u56FE\u7247" + (summary.notes ? "\uFF08" + summary.notes + " \u7BC7\uFF09" : "") + (summary.innerFailedNotes ? "\uFF1B\u5185\u56FE\u83B7\u53D6\u5931\u8D25 " + summary.innerFailedNotes + " \u7BC7" : "") + (summary.failedImages ? "\uFF1B" + summary.failedImages + " \u5F20\u4E0B\u8F7D\u5931\u8D25" : "") + (summary.videoSkipped ? "\uFF1B" + summary.videoSkipped + " \u7BC7\u89C6\u9891\u65E0\u5185\u56FE\u5DF2\u8DF3\u8FC7" : "");
+  var BATCH_DOWNLOAD_FAIL_TEXT = "\u5168\u90E8\u56FE\u7247\u4E0B\u8F7D\u5931\u8D25";
+  var BATCH_DOWNLOAD_NOTHING_TEXT = "\u6CA1\u6709\u53EF\u4E0B\u8F7D\u7684\u56FE\u7247";
+  var BATCH_SCOPE_ID = "xhs-enhanced-batch-scope";
+  var BATCH_SCOPE_COVER_ID = "xhs-enhanced-batch-scope-cover";
+  var BATCH_SCOPE_INNER_ID = "xhs-enhanced-batch-scope-inner";
+  var BATCH_SCOPE_ALL_ID = "xhs-enhanced-batch-scope-all";
+  var BATCH_PROGRESS_ID = "xhs-enhanced-batch-progress";
   var SELECTORS = Object.freeze({
     noteLinks: 'a[href*="/explore/"],a[href*="/discovery/item/"],a[href*="/search_result/"]',
     cardContainers: "[data-note-card],article.note-item,section.note-item,.note-item",
@@ -1290,6 +1753,14 @@
   var saveInFlight = false;
   var libraryPageButton = null;
   var libraryBatchButton = null;
+  var batchBar = null;
+  var batchDownloadButton = null;
+  var batchSelectLoadedButton = null;
+  var batchContinuousButton = null;
+  var continuousSelect = false;
+  var batchDownloadInFlight = false;
+  var batchScopeCache2 = "all";
+  var selection = createSelectionStore(getSessionStorageSafe());
   var fallbackTokenResolver = null;
   var pending = /* @__PURE__ */ new Set();
   var counters = { batches: 0, processed: 0, fullScans: 0, routeSignals: 0 };
@@ -1667,6 +2138,355 @@
     const container = card.querySelector("." + CARD_ACTIONS_CLASS);
     if (container) container.remove();
   }
+  function removeCardCheckbox(card) {
+    if (!card || !card.querySelector) return;
+    const box = card.querySelector("." + CHECKBOX_CLASS);
+    if (box) box.remove();
+  }
+  function ensureCardCheckbox(card) {
+    if (!card || !card.querySelector || !card.isConnected) return null;
+    if (!isTargetRoute(getCurrentRoute())) {
+      removeCardCheckbox(card);
+      return null;
+    }
+    try {
+      const position = ROOT.getComputedStyle ? ROOT.getComputedStyle(card).position : "";
+      if (position === "static" || !position) card.style.position = "relative";
+    } catch (_) {
+    }
+    let box = card.querySelector("." + CHECKBOX_CLASS);
+    if (!box) {
+      box = ROOT.document.createElement("button");
+      box.type = "button";
+      box.className = CHECKBOX_CLASS;
+      box.textContent = CHECKBOX_CHECKED_TEXT;
+      box.setAttribute("role", "checkbox");
+      box.setAttribute("aria-checked", "false");
+      box.setAttribute("aria-label", "\u9009\u62E9\u8FD9\u7BC7\u7B14\u8BB0");
+      box.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleCardSelection(card);
+      });
+      card.appendChild(box);
+    }
+    return box;
+  }
+  function syncCardCheckbox(card) {
+    if (!card || !card.querySelector) return;
+    const box = card.querySelector("." + CHECKBOX_CLASS);
+    if (!box) return;
+    const id = cardNoteTargetId(card);
+    const checked = Boolean(id && selection.has(id));
+    box.setAttribute("aria-checked", checked ? "true" : "false");
+    box.classList.toggle("xhs-enhanced-checkbox--checked", checked);
+  }
+  function syncAllCheckboxes(root) {
+    const scope = root || ROOT.document;
+    if (!scope || !scope.querySelectorAll) return;
+    for (const card of discoverCards(scope)) syncCardCheckbox(card);
+  }
+  function renderCardChrome(card) {
+    if (!card) return;
+    ensureCardCheckbox(card);
+    if (continuousSelect) {
+      const id = cardNoteTargetId(card);
+      if (id && !selection.has(id)) {
+        const snapshot = snapshotFromCard(card);
+        if (snapshot) selection.add(snapshot);
+      }
+    }
+    syncCardCheckbox(card);
+  }
+  var batchCountCache = "";
+  var selectLoadedCache = null;
+  var batchDownloadCache = null;
+  function updateBatchBarCount() {
+    if (!batchBar || !batchBar.isConnected) return;
+    const countNode = batchBar.querySelector("#" + BATCH_COUNT_ID);
+    const text = "\u5DF2\u9009 " + selection.size + " \u7BC7";
+    if (countNode && batchCountCache !== text) {
+      batchCountCache = text;
+      countNode.textContent = text;
+    }
+    if (batchSelectLoadedButton) {
+      const cards = isTargetRoute(getCurrentRoute()) ? discoverCards(ROOT.document) : [];
+      let loaded = 0;
+      let selectedLoaded = 0;
+      for (const card of cards) {
+        const id = cardNoteTargetId(card);
+        if (!id) continue;
+        loaded += 1;
+        if (selection.has(id)) selectedLoaded += 1;
+      }
+      const allLoadedSelected = loaded > 0 && selectedLoaded === loaded;
+      if (selectLoadedCache !== allLoadedSelected) {
+        selectLoadedCache = allLoadedSelected;
+        batchSelectLoadedButton.setAttribute("aria-pressed", allLoadedSelected ? "true" : "false");
+      }
+    }
+  }
+  function updateBatchDownloadButton() {
+    if (!batchDownloadButton) return;
+    const text = batchDownloadInFlight ? "\u4E0B\u8F7D\u4E2D\u2026" : "\u4E0B\u8F7D\u5DF2\u9009";
+    if (batchDownloadCache === text && batchDownloadButton.disabled === batchDownloadInFlight) return;
+    batchDownloadCache = text;
+    batchDownloadButton.disabled = batchDownloadInFlight;
+    batchDownloadButton.textContent = text;
+  }
+  function toggleCardSelection(card) {
+    const snapshot = snapshotFromCard(card);
+    if (!snapshot) {
+      showCopyStatus("\u672A\u627E\u5230\u7B14\u8BB0 ID\uFF0C\u65E0\u6CD5\u52FE\u9009");
+      return;
+    }
+    selection.toggle(snapshot);
+    syncCardCheckbox(card);
+    updateBatchBarCount();
+  }
+  function onSelectLoadedClick() {
+    const cards = discoverCards(ROOT.document);
+    const loaded = [];
+    for (const card of cards) {
+      const id = cardNoteTargetId(card);
+      if (id) loaded.push({ card, id });
+    }
+    if (!loaded.length) {
+      showCopyStatus(BATCH_NO_LOADED_TEXT);
+      return;
+    }
+    const allSelected = loaded.every(({ id }) => selection.has(id));
+    for (const { card, id } of loaded) {
+      if (allSelected) {
+        selection.remove(id);
+      } else if (!selection.has(id)) {
+        const snapshot = snapshotFromCard(card);
+        if (snapshot) selection.add(snapshot);
+      }
+    }
+    syncAllCheckboxes(ROOT.document);
+    updateBatchBarCount();
+    showCopyStatus(allSelected ? BATCH_SELECT_ALL_OFF_TEXT : BATCH_SELECT_ALL_ON_TEXT(loaded.length));
+  }
+  function onContinuousToggleClick() {
+    continuousSelect = !continuousSelect;
+    if (batchContinuousButton) batchContinuousButton.setAttribute("aria-pressed", continuousSelect ? "true" : "false");
+    showCopyStatus(continuousSelect ? BATCH_CONTINUOUS_ON_TEXT : BATCH_CONTINUOUS_OFF_TEXT);
+    if (continuousSelect) scan(ROOT.document);
+  }
+  function onBatchClearClick() {
+    selection.clear();
+    syncAllCheckboxes(ROOT.document);
+    updateBatchBarCount();
+    showCopyStatus(BATCH_CLEARED_TEXT);
+  }
+  var SCOPE_LABELS = { cover: "\u53EA\u5C01\u9762", inner: "\u53EA\u5185\u56FE", all: "\u5168\u90E8\u56FE\u7247" };
+  function updateBatchScopeButtons() {
+    if (!batchBar) return;
+    for (const [scope, id] of [["cover", BATCH_SCOPE_COVER_ID], ["inner", BATCH_SCOPE_INNER_ID], ["all", BATCH_SCOPE_ALL_ID]]) {
+      const button = ROOT.document.getElementById(id);
+      if (!button) continue;
+      const pressed = batchScopeCache2 === scope;
+      if (button.getAttribute("aria-pressed") !== (pressed ? "true" : "false")) {
+        button.setAttribute("aria-pressed", pressed ? "true" : "false");
+      }
+    }
+  }
+  function onBatchScopeClick(scope) {
+    const result = writeStoredBatchScope(scope);
+    batchScopeCache2 = result.value;
+    updateBatchScopeButtons();
+    showCopyStatus("\u4E0B\u8F7D\u8303\u56F4\uFF1A" + (SCOPE_LABELS[batchScopeCache2] || batchScopeCache2));
+  }
+  var batchProgressNode = null;
+  function showBatchProgress(message) {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let node = batchProgressNode && batchProgressNode.isConnected ? batchProgressNode : ROOT.document.getElementById(BATCH_PROGRESS_ID);
+    if (!node) {
+      node = ROOT.document.createElement("div");
+      node.id = BATCH_PROGRESS_ID;
+      node.setAttribute("role", "status");
+      ROOT.document.body.appendChild(node);
+    }
+    if (node.textContent !== message) node.textContent = message;
+    batchProgressNode = node;
+  }
+  function clearBatchProgress() {
+    const node = batchProgressNode && batchProgressNode.isConnected ? batchProgressNode : ROOT.document && ROOT.document.getElementById(BATCH_PROGRESS_ID);
+    if (node) node.remove();
+    batchProgressNode = null;
+  }
+  function onBatchDownload() {
+    if (batchDownloadInFlight) return;
+    const items = selection.values();
+    if (!items.length) {
+      showCopyStatus(BATCH_EMPTY_TEXT);
+      return;
+    }
+    const scope = batchScopeCache2;
+    if (scope !== "inner" && !items.some((item) => item.coverUrl) && !items.some((item) => item.link)) {
+      showCopyStatus(BATCH_NO_COVER_TEXT);
+      return;
+    }
+    batchDownloadInFlight = true;
+    updateBatchDownloadButton();
+    showCopyStatus(BATCH_DOWNLOAD_START_TEXT(items.length));
+    showBatchProgress(BATCH_DOWNLOAD_FETCHING_TEXT(0, items.length));
+    let fetched = 0;
+    mapWithConcurrency(items, 2, (item, index) => downloadNoteImages(scope, item).then((result) => {
+      fetched += 1;
+      showBatchProgress(BATCH_DOWNLOAD_FETCHING_TEXT(fetched, items.length));
+      return result;
+    }, () => {
+      fetched += 1;
+      showBatchProgress(BATCH_DOWNLOAD_FETCHING_TEXT(fetched, items.length));
+      return { item, ok: false, reason: "error", entries: [], failedImages: 0, skippedVideo: false, innerFailed: false, detailSource: "" };
+    })).then((jobs) => {
+      const entries = [];
+      let sequence = 0;
+      let notesSaved = 0;
+      let failedImages = 0;
+      let failedNotes = 0;
+      let videoSkipped = 0;
+      let innerFailedNotes = 0;
+      const layout = readStoredBatchLayout();
+      for (const job of jobs || []) {
+        failedImages += job && typeof job.failedImages === "number" ? job.failedImages : 0;
+        if (job && job.skippedVideo) videoSkipped += 1;
+        if (job && job.innerFailed) innerFailedNotes += 1;
+        if (!job || !Array.isArray(job.entries) || !job.entries.length) {
+          if (scope === "inner" || job && job.ok === false) failedNotes += 1;
+          continue;
+        }
+        for (const entry of job.entries) {
+          const name = layout === "flat" ? buildFlatEntryName(sequence, job.item.id, entry.name) : buildNoteFolderName(sequence, job.item.id, job.item.title) + "/" + entry.name;
+          entries.push({ name, bytes: entry.bytes });
+        }
+        sequence += 1;
+        notesSaved += 1;
+      }
+      if (!entries.length) {
+        batchDownloadInFlight = false;
+        updateBatchDownloadButton();
+        clearBatchProgress();
+        showCopyStatus(scope === "inner" && videoSkipped === items.length ? "\u89C6\u9891\u7B14\u8BB0\u4E0D\u542B\u5185\u56FE\uFF0C\u6CA1\u6709\u53EF\u4E0B\u8F7D\u7684\u56FE\u7247" : BATCH_DOWNLOAD_NOTHING_TEXT);
+        return;
+      }
+      showBatchProgress(BATCH_DOWNLOAD_PACKING_TEXT(entries.length));
+      const now = /* @__PURE__ */ new Date();
+      try {
+        const totalBytes = entries.reduce((sum, entry) => sum + (entry.bytes ? entry.bytes.length : 0), 0);
+        const parts = totalBytes > MAX_ZIP_BYTES ? splitZipEntries(entries, MAX_ZIP_BYTES) : [entries];
+        for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
+          const zipBytes = buildZip(parts[partIndex], { now });
+          const zipBlob = new Blob([zipBytes], { type: "application/zip" });
+          triggerCoverDownload(zipBlob, buildBatchZipFileName(now, entries.length, partIndex, parts.length));
+        }
+        batchDownloadInFlight = false;
+        updateBatchDownloadButton();
+        clearBatchProgress();
+        showCopyStatus(BATCH_DOWNLOAD_DONE_TEXT({
+          saved: entries.length,
+          notes: notesSaved,
+          failedImages,
+          videoSkipped,
+          innerFailedNotes: scope === "all" ? innerFailedNotes : 0
+        }));
+      } catch (_) {
+        batchDownloadInFlight = false;
+        updateBatchDownloadButton();
+        clearBatchProgress();
+        showCopyStatus("\u6253\u5305\u4E0B\u8F7D\u5931\u8D25");
+      }
+    }, () => {
+      batchDownloadInFlight = false;
+      updateBatchDownloadButton();
+      clearBatchProgress();
+      showCopyStatus(BATCH_DOWNLOAD_FAIL_TEXT);
+    });
+  }
+  function removeBatchBar() {
+    const bar = batchBar && batchBar.isConnected ? batchBar : ROOT.document && ROOT.document.getElementById(BATCH_BAR_ID);
+    if (bar) bar.remove();
+    batchBar = null;
+    batchDownloadButton = null;
+    batchSelectLoadedButton = null;
+    batchContinuousButton = null;
+    batchCountCache = "";
+    selectLoadedCache = null;
+    batchDownloadCache = null;
+  }
+  function ensureBatchBar() {
+    if (!ROOT.document || !ROOT.document.body) return;
+    let bar = batchBar && batchBar.isConnected ? batchBar : ROOT.document.getElementById(BATCH_BAR_ID);
+    if (!bar) {
+      bar = ROOT.document.createElement("div");
+      bar.id = BATCH_BAR_ID;
+      bar.setAttribute("role", "toolbar");
+      bar.setAttribute("aria-label", "\u6279\u91CF\u4E0B\u8F7D\u5DF2\u9009\u7B14\u8BB0\u7684\u5C01\u9762");
+      const countNode = ROOT.document.createElement("span");
+      countNode.id = BATCH_COUNT_ID;
+      countNode.textContent = "\u5DF2\u9009 " + selection.size + " \u7BC7";
+      const selectLoaded = ROOT.document.createElement("button");
+      selectLoaded.id = BATCH_SELECT_LOADED_ID;
+      selectLoaded.type = "button";
+      selectLoaded.textContent = "\u5168\u9009\u5DF2\u52A0\u8F7D";
+      selectLoaded.setAttribute("aria-pressed", "false");
+      selectLoaded.addEventListener("click", onSelectLoadedClick);
+      const continuous = ROOT.document.createElement("button");
+      continuous.id = BATCH_CONTINUOUS_ID;
+      continuous.type = "button";
+      continuous.textContent = "\u8FDE\u7EED\u52FE\u9009";
+      continuous.setAttribute("aria-pressed", "false");
+      continuous.setAttribute("title", "\u5F00\u542F\u540E\u6EDA\u52A8\u52A0\u8F7D\u7684\u65B0\u7B14\u8BB0\u4F1A\u81EA\u52A8\u52FE\u9009");
+      continuous.addEventListener("click", onContinuousToggleClick);
+      const clear = ROOT.document.createElement("button");
+      clear.id = BATCH_CLEAR_ID;
+      clear.type = "button";
+      clear.textContent = "\u6E05\u7A7A";
+      clear.addEventListener("click", onBatchClearClick);
+      const scopeGroup = ROOT.document.createElement("div");
+      scopeGroup.id = BATCH_SCOPE_ID;
+      scopeGroup.setAttribute("role", "group");
+      scopeGroup.setAttribute("aria-label", "\u4E0B\u8F7D\u8303\u56F4");
+      for (const [scope, id, label] of [["cover", BATCH_SCOPE_COVER_ID, "\u5C01\u9762"], ["inner", BATCH_SCOPE_INNER_ID, "\u5185\u56FE"], ["all", BATCH_SCOPE_ALL_ID, "\u5168\u90E8"]]) {
+        const scopeButton = ROOT.document.createElement("button");
+        scopeButton.id = id;
+        scopeButton.type = "button";
+        scopeButton.textContent = label;
+        scopeButton.setAttribute("data-scope", scope);
+        scopeButton.setAttribute("aria-pressed", batchScopeCache2 === scope ? "true" : "false");
+        scopeButton.addEventListener("click", () => onBatchScopeClick(scope));
+        scopeGroup.appendChild(scopeButton);
+      }
+      const download = ROOT.document.createElement("button");
+      download.id = BATCH_DOWNLOAD_ID;
+      download.type = "button";
+      download.textContent = "\u4E0B\u8F7D\u5DF2\u9009";
+      download.addEventListener("click", onBatchDownload);
+      bar.append(countNode, selectLoaded, continuous, clear, scopeGroup, download);
+      ROOT.document.body.appendChild(bar);
+      batchDownloadButton = download;
+      batchSelectLoadedButton = selectLoaded;
+      batchContinuousButton = continuous;
+    } else {
+      batchDownloadButton = bar.querySelector("#" + BATCH_DOWNLOAD_ID);
+      batchSelectLoadedButton = bar.querySelector("#" + BATCH_SELECT_LOADED_ID);
+      batchContinuousButton = bar.querySelector("#" + BATCH_CONTINUOUS_ID);
+    }
+    batchBar = bar;
+    updateBatchScopeButtons();
+    updateBatchBarCount();
+    updateBatchDownloadButton();
+  }
+  function syncBatchBar() {
+    if (!ROOT.document || !ROOT.document.body) return;
+    if (isTargetRoute(getCurrentRoute())) {
+      ensureBatchBar();
+    } else {
+      removeBatchBar();
+    }
+  }
   function getCurrentRoute() {
     if (TEST_MODE && routeProvider) return String(routeProvider() || "");
     return ROOT.location ? ROOT.location.pathname : "";
@@ -1703,6 +2523,170 @@
     }
     return targetId;
   }
+  function getSessionStorageSafe() {
+    try {
+      const chrome = getChrome();
+      if (chrome && chrome.storage && chrome.storage.session) return chrome.storage.session;
+    } catch (_) {
+    }
+    return null;
+  }
+  function extractCardTitle(card) {
+    if (!card || !card.querySelector) return "";
+    const node = card.querySelector('.title span, .title, [class*="title"]');
+    const text = node ? normalizeSpace(node.textContent || "") : "";
+    return text.slice(0, 60);
+  }
+  function snapshotFromCard(card) {
+    const id = cardNoteTargetId(card);
+    if (!id) return null;
+    return {
+      id,
+      link: resolveCardNoteLink(card),
+      coverUrl: extractCoverUrl(card),
+      title: extractCardTitle(card),
+      ts: Date.now()
+    };
+  }
+  function mapWithConcurrency(items, limit, worker) {
+    const list = Array.isArray(items) ? items : [];
+    const results = new Array(list.length);
+    let cursor = 0;
+    const lanes = [];
+    for (let lane = 0; lane < Math.max(1, Math.min(limit, list.length)); lane += 1) {
+      lanes.push((async () => {
+        while (cursor < list.length) {
+          const index = cursor;
+          cursor += 1;
+          try {
+            results[index] = await worker(list[index], index);
+          } catch (_) {
+            results[index] = { ok: false, reason: "error", item: list[index] };
+          }
+        }
+      })());
+    }
+    return Promise.all(lanes).then(() => results);
+  }
+  function isCaptureMode() {
+    try {
+      const search = ROOT.location && ROOT.location.search;
+      return typeof search === "string" && search.indexOf("xhs_enh_capture=1") >= 0;
+    } catch (_) {
+      return false;
+    }
+  }
+  function initCaptureMode() {
+    initialized = true;
+    const chrome = getChrome();
+    if (!chrome || !chrome.runtime || !chrome.runtime.onMessage || typeof chrome.runtime.onMessage.addListener !== "function") return;
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!message || message.type !== COLLECT_NOTE_MESSAGE) return void 0;
+      const note = collectSlimNoteFromDocument();
+      sendResponse(note ? { ok: true, note } : { ok: false, error: "no-state" });
+      return void 0;
+    });
+  }
+  function collectSlimNoteFromDocument() {
+    if (!ROOT.document) return null;
+    for (const script of Array.from(ROOT.document.querySelectorAll("script"))) {
+      const text = script.textContent || "";
+      if (text.indexOf("__INITIAL_STATE__=") < 0) continue;
+      const state = parseInitialStateFromScriptText(text);
+      const noteMap = state && state.note && state.note.noteDetailMap;
+      const first = noteMap && Object.values(noteMap)[0];
+      const slim = slimNoteDetail(first && first.note);
+      if (slim) return slim;
+    }
+    return null;
+  }
+  async function fetchNoteDetailFromPage(link) {
+    const res = await fetchText(link, { timeout: 3e4 });
+    if (res && res.ok && typeof res.text === "string" && res.text) {
+      const note = extractNoteFromInitialStateHtml(res.text);
+      if (note) return { ok: true, note, source: "fetch" };
+      return { ok: false, reason: "parse" };
+    }
+    return { ok: false, reason: res && res.status ? "http-" + res.status : res && res.error || "network" };
+  }
+  async function collectNoteDetail(link) {
+    if (!link) return { ok: false, reason: "no-link" };
+    const direct = await fetchNoteDetailFromPage(link);
+    if (direct.ok) return direct;
+    const chrome = getChrome();
+    if (!chrome || !chrome.runtime || typeof chrome.runtime.sendMessage !== "function") {
+      return { ok: false, reason: direct.reason || "no-channel" };
+    }
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: COLLECT_NOTE_VIA_TAB_MESSAGE, link });
+      if (resp && resp.ok && resp.note && Array.isArray(resp.note.imageList)) {
+        return { ok: true, note: resp.note, source: "tab" };
+      }
+      return { ok: false, reason: resp && resp.error || direct.reason || "tab-failed" };
+    } catch (_) {
+      return { ok: false, reason: direct && direct.reason || "tab-failed" };
+    }
+  }
+  function loadImageEntry(url) {
+    if (!url) return Promise.resolve(null);
+    return loadCoverPngBlob(url).then((result) => {
+      const blob = result && result.ok ? result.blob : null;
+      if (!blob) return null;
+      return ensureJpegCoverBlob(blob).then((finalBlob) => {
+        const ext = resolveCoverExtFromMime(finalBlob.type) || resolveCoverExtFromUrl(url) || "jpg";
+        return finalBlob.arrayBuffer().then((buffer) => ({ bytes: new Uint8Array(buffer), ext }), () => null);
+      }, () => null);
+    }, () => null);
+  }
+  async function downloadNoteImages(scope, item) {
+    const result = {
+      item,
+      ok: true,
+      failedImages: 0,
+      skippedVideo: false,
+      innerFailed: false,
+      detailSource: "",
+      entries: []
+    };
+    let note = null;
+    if (scope !== "cover") {
+      const detail = await collectNoteDetail(item.link);
+      if (detail.ok) {
+        note = detail.note;
+        result.detailSource = detail.source;
+      } else if (scope === "inner") {
+        result.ok = false;
+        result.error = detail.reason || "detail-failed";
+        return result;
+      } else {
+        result.innerFailed = true;
+      }
+    }
+    const images = note && Array.isArray(note.imageList) ? note.imageList : [];
+    const isVideo = Boolean(note && note.type === "video");
+    if (scope !== "inner") {
+      const coverImage = images[0] || null;
+      const coverUrl = coverImage ? pickBestImageUrl(coverImage) : item.coverUrl || "";
+      const entry = await loadImageEntry(coverUrl);
+      if (entry) result.entries.push({ name: buildImageFileName(0, entry.ext, true), bytes: entry.bytes });
+      else result.failedImages += 1;
+    }
+    if (scope !== "cover" && note) {
+      const innerImages = isVideo ? [] : images.slice(1);
+      if (isVideo && scope === "inner") result.skippedVideo = true;
+      for (let index = 0; index < innerImages.length; index += 1) {
+        const url = pickBestImageUrl(innerImages[index]);
+        const entry = await loadImageEntry(url);
+        if (!entry) {
+          result.failedImages += 1;
+          continue;
+        }
+        const order = scope === "inner" ? index : index + 1;
+        result.entries.push({ name: buildImageFileName(order, entry.ext, false), bytes: entry.bytes });
+      }
+    }
+    return result;
+  }
   function isReliableCard(card) {
     if (!card || !card.querySelector) return false;
     return Boolean(cardNoteTargetId(card)) && Boolean(card.querySelector(SELECTORS.likeNodes));
@@ -1737,7 +2721,10 @@
   }
   function applyCardActionsFallback() {
     if (!ROOT.document || !isTargetRoute(getCurrentRoute())) return;
-    for (const card of discoverLinkCards(ROOT.document)) ensureCardActions(card);
+    for (const card of discoverLinkCards(ROOT.document)) {
+      ensureCardActions(card);
+      renderCardChrome(card);
+    }
   }
   function ensureStyle() {
     if (!ROOT.document || ROOT.document.getElementById(STYLE_ID)) return;
@@ -1772,6 +2759,24 @@
       .${COPY_COVER_CLASS}{background:rgba(30,30,30,.82)!important}
       .${DOWNLOAD_COVER_CLASS}{background:rgba(37,99,235,.92)!important}
       .${DOWNLOAD_COVER_CLASS}:hover{background:rgba(29,78,216,1)!important}
+      .${CHECKBOX_CLASS}{position:absolute;top:6px;right:6px;z-index:2147483645;width:24px;height:24px;border-radius:7px;border:2px solid rgba(255,255,255,.9);background:rgba(0,0,0,.38);color:transparent;font:700 15px/1 system-ui,sans-serif;display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.4);transition:background .15s ease,border-color .15s ease,color .15s ease}
+      .${CHECKBOX_CLASS}:hover{background:rgba(0,0,0,.6)}
+      .${CHECKBOX_CLASS}--checked,.${CHECKBOX_CLASS}[aria-checked="true"]{background:#ff2442;border-color:#ff2442;color:#fff}
+      .${CHECKBOX_CLASS}:focus-visible,#${BATCH_SELECT_LOADED_ID}:focus-visible,#${BATCH_CONTINUOUS_ID}:focus-visible,#${BATCH_CLEAR_ID}:focus-visible,#${BATCH_DOWNLOAD_ID}:focus-visible{outline:2px solid #fff;outline-offset:2px}
+      #${BATCH_BAR_ID}{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:2147483646;display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;max-width:min(680px,calc(100vw - 32px));padding:8px 10px;border-radius:14px;background:rgba(30,30,30,.93);box-shadow:0 6px 24px rgba(0,0,0,.4);font:13px/1.4 system-ui,sans-serif;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+      #${BATCH_COUNT_ID}{color:#fff;font-weight:700;white-space:nowrap;padding:0 4px}
+      #${BATCH_BAR_ID} button{border:0;border-radius:999px;padding:8px 14px;font:600 13px/1.4 system-ui,sans-serif;white-space:nowrap;cursor:pointer;background:rgba(255,255,255,.14);color:#fff;transition:background .15s ease,opacity .15s ease}
+      #${BATCH_BAR_ID} button:hover{background:rgba(255,255,255,.24)}
+      #${BATCH_SELECT_LOADED_ID}[aria-pressed="true"],#${BATCH_CONTINUOUS_ID}[aria-pressed="true"]{background:#ff2442;color:#fff}
+      #${BATCH_DOWNLOAD_ID}{background:#ff2442;color:#fff;font-weight:700}
+      #${BATCH_DOWNLOAD_ID}:hover{background:#e61e3c}
+      #${BATCH_DOWNLOAD_ID}:disabled{opacity:.55;cursor:default}
+      #${BATCH_SCOPE_ID}{display:flex;gap:2px;padding:2px;border-radius:999px;background:rgba(255,255,255,.12)}
+      #${BATCH_SCOPE_ID} button{border:0;border-radius:999px;padding:6px 11px;background:transparent;color:rgba(255,255,255,.72);font:600 12px/1.4 system-ui,sans-serif;cursor:pointer}
+      #${BATCH_SCOPE_ID} button:hover{background:rgba(255,255,255,.18);color:#fff}
+      #${BATCH_SCOPE_ID} button[aria-pressed="true"]{background:#ff2442;color:#fff}
+      #${BATCH_SCOPE_ID} button:focus-visible,#${BATCH_PROGRESS_ID}:focus-visible{outline:2px solid #fff;outline-offset:2px}
+      #${BATCH_PROGRESS_ID}{position:fixed;top:226px;right:24px;z-index:2147483646;max-width:300px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.93);color:#fff;font:13px/1.5 system-ui,sans-serif;pointer-events:none}
     `;
     (ROOT.document.head || ROOT.document.documentElement).appendChild(style);
   }
@@ -1787,6 +2792,7 @@
     if (like) like.node.classList.toggle(LIKE_CLASS, popular);
     card.setAttribute(SIGNATURE_ATTRIBUTE, signature);
     ensureCardActions(card);
+    renderCardChrome(card);
     counters.processed += 1;
   }
   function cleanupCard(card) {
@@ -1795,12 +2801,14 @@
     card.classList.remove(DIMMED_CLASS);
     card.removeAttribute(SIGNATURE_ATTRIBUTE);
     removeCardActions(card);
+    removeCardCheckbox(card);
     for (const node of card.querySelectorAll(`.${LIKE_CLASS}`)) node.classList.remove(LIKE_CLASS);
   }
   function cleanupAll() {
     if (!ROOT.document) return;
     for (const card of ROOT.document.querySelectorAll(`.${CARD_CLASS},[${SIGNATURE_ATTRIBUTE}]`)) cleanupCard(card);
     for (const container of ROOT.document.querySelectorAll("." + CARD_ACTIONS_CLASS)) container.remove();
+    for (const checkbox of ROOT.document.querySelectorAll("." + CHECKBOX_CLASS)) checkbox.remove();
   }
   function selectNextPopularCard(cards, viewportHeight) {
     let selected = null;
@@ -2032,6 +3040,7 @@
     counters.batches += 1;
     syncJumpUi();
     syncLibraryUi();
+    syncBatchBar();
     const url = ROOT.location ? ROOT.location.href : getCurrentRoute();
     if (url !== lastUrl) {
       lastUrl = url;
@@ -2052,6 +3061,7 @@
       if (card) renderCard(card);
     }
     applyCardActionsFallback();
+    updateBatchBarCount();
   }
   function schedule(root) {
     if (destroyed) return;
@@ -2127,8 +3137,13 @@
   function init() {
     if (!ROOT.document || initialized) return;
     initialized = true;
+    if (isCaptureMode()) {
+      initCaptureMode();
+      return;
+    }
     lifecycleToken = { active: true };
     destroyed = false;
+    batchScopeCache2 = readStoredBatchScope();
     ensureStyle();
     bindObserverRoot(selectObserverRoot());
     subscribePreferenceChanges();
@@ -2143,6 +3158,12 @@
     scan(ROOT.document);
     syncJumpUi();
     syncLibraryUi();
+    syncBatchBar();
+    selection.hydrate().then(() => {
+      syncAllCheckboxes(ROOT.document);
+      updateBatchBarCount();
+    }, () => {
+    });
   }
   function destroy() {
     if (!initialized) return;
@@ -2162,6 +3183,10 @@
     for (const [target, type, handler] of eventBindings.splice(0)) target.removeEventListener(type, handler);
     removeJumpUi();
     removeLibraryUi();
+    removeBatchBar();
+    clearBatchProgress();
+    batchDownloadInFlight = false;
+    continuousSelect = false;
     saveInFlight = false;
     clearCopyStatus();
     cleanupAll();
@@ -2204,10 +3229,29 @@
     parseTokenExp,
     buildCrawlPayload,
     parseInitialStateFromScriptText,
+    extractNoteFromInitialStateHtml,
+    slimNoteDetail,
+    pickBestImageUrl,
     buildDetailNoteUrl,
     resolveSaveUrlFromCard,
     cardNoteTargetId,
     resolveCardNoteLink,
+    extractCardTitle,
+    snapshotFromCard,
+    onBatchDownload,
+    mapWithConcurrency,
+    buildZip,
+    splitZipEntries,
+    buildBatchZipFileName,
+    buildNoteFolderName,
+    buildImageFileName,
+    buildFlatEntryName,
+    crc32,
+    sanitizeFileName,
+    createSelectionStore,
+    SELECTION_STORAGE_KEY,
+    normalizeBatchScope,
+    normalizeBatchLayout,
     READ_ATTRIBUTES,
     SELECTORS
   });
@@ -2230,6 +3274,24 @@
       flush,
       init,
       destroy,
+      clearTestSelection() {
+        continuousSelect = false;
+        batchDownloadInFlight = false;
+        if (batchContinuousButton) batchContinuousButton.setAttribute("aria-pressed", "false");
+        selection.clear();
+        syncAllCheckboxes(ROOT.document);
+        updateBatchBarCount();
+        updateBatchDownloadButton();
+      },
+      getBatchSelectionSnapshot: () => selection.values(),
+      getBatchScopeSnapshot: () => batchScopeCache2,
+      setBatchScope: (scope) => {
+        batchScopeCache2 = writeStoredBatchScope(scope).value;
+        updateBatchScopeButtons();
+        return batchScopeCache2;
+      },
+      setBatchLayout: (layout) => writeStoredBatchLayout(layout).value,
+      getBatchLayoutSnapshot: () => readStoredBatchLayout(),
       setThreshold: (value) => writeStoredThreshold(value),
       getThreshold: () => readStoredThreshold(),
       setFocusPopular: (value, _storage) => writeStoredFocusPopular(value).persisted,

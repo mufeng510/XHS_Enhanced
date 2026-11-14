@@ -10,7 +10,9 @@ import {
   writeSecret,
   LIBRARY_REFRESH_KEY,
   readStoredThreshold,
-  writeStoredThreshold
+  writeStoredThreshold,
+  readStoredBatchLayout,
+  writeStoredBatchLayout
 } from '../lib/settings.js';
 import { parseBaseUrl, parseThreshold } from '../lib/pure.js';
 import {
@@ -32,7 +34,9 @@ const els = {
   clear: document.getElementById('library-clear'),
   status: document.getElementById('library-status'),
   httpWarning: document.getElementById('library-http-warning'),
-  threshold: document.getElementById('popular-threshold')
+  threshold: document.getElementById('popular-threshold'),
+  layoutNotes: document.getElementById('batch-layout-notes'),
+  layoutFlat: document.getElementById('batch-layout-flat')
 };
 
 function isPlainHttp(value) {
@@ -81,6 +85,11 @@ function fillForm() {
   els.user.value = cfg.username;
   els.password.value = cfg.password;
   if (els.threshold) els.threshold.value = String(readStoredThreshold());
+  const layout = readStoredBatchLayout();
+  if (els.layoutNotes && els.layoutFlat) {
+    els.layoutNotes.checked = layout !== 'flat';
+    els.layoutFlat.checked = layout === 'flat';
+  }
   // Account list is discovered on demand (test connection); keep a placeholder.
   els.account.textContent = '';
   const placeholder = document.createElement('option');
@@ -168,12 +177,14 @@ async function onSave() {
     return;
   }
   const thresholdPersisted = writeStoredThreshold(parsedThreshold.value).persisted;
+  const layoutPersisted = writeStoredBatchLayout(els.layoutFlat && els.layoutFlat.checked ? 'flat' : 'notes').persisted;
+  const prefsPersisted = thresholdPersisted && layoutPersisted;
 
   const form = readForm();
-  if (!form.base.ok) { showStatus('热门阈值 ' + (thresholdPersisted ? '已保存，但服务器地址需以 http:// 或 https:// 开头' : '未能持久化，且服务器地址需以 http:// 或 https:// 开头')); return; }
+  if (!form.base.ok) { showStatus('热门阈值 ' + (prefsPersisted ? '已保存，但服务器地址需以 http:// 或 https:// 开头' : '未能持久化，且服务器地址需以 http:// 或 https:// 开头')); return; }
   showStatus('正在保存…');
   const granted = await ensureHostPermission(form.base.value);
-  if (!granted) { showStatus('热门阈值 ' + (thresholdPersisted ? '已保存' : '未能持久化') + '；未能获得该服务器的访问授权（可在扩展详情页“权限”中允许）'); return; }
+  if (!granted) { showStatus('偏好设置' + (prefsPersisted ? '已保存' : '未能持久化') + '；未能获得该服务器的访问授权（可在扩展详情页“权限”中允许）'); return; }
   const persisted = writeLibrarySettings({
     baseUrl: form.base.value,
     username: form.username,
@@ -182,7 +193,7 @@ async function onSave() {
   });
   clearLibraryTokens();
   showStatus(persisted
-    ? (thresholdPersisted ? '全部设置已保存' : '内容库设置已保存，热门阈值未能持久化')
+    ? (prefsPersisted ? '全部设置已保存' : '设置已保存，但部分偏好未能持久化')
     : '设置已应用，但未能持久化');
 }
 

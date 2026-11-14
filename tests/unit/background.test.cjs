@@ -257,3 +257,133 @@ test('messages from another extension are refused when the sender id differs', a
   });
   assert.equal(res.error, 'forbidden');
 });
+
+// --- Hidden-tab note collection (M2 fallback for the batch downloader) -------
+const { COLLECT_NOTE_VIA_TAB_MESSAGE, COLLECT_NOTE_MESSAGE } = require('../../src/lib/remote.js');
+
+function loadBackgroundWithTabs({ tabsCreate, tabsSendMessage, tabsRemove, fetchImpl } = {}) {
+  const listeners = [];
+  const created = [];
+  const removed = [];
+  const chrome = {
+    runtime: {
+      id: 'test-extension-id',
+      onMessage: { addListener(listener) { listeners.push(listener); } }
+    },
+    permissions: { async contains() { return true; } },
+    tabs: {
+      async create(options) {
+        created.push(options);
+        const tab = await tabsCreate(options);
+        return tab;
+      },
+      async sendMessage(tabId, message) {
+        return tabsSendMessage(tabId, message);
+      },
+      async remove(tabId) {
+        removed.push(tabId);
+        if (tabsRemove) return tabsRemove(tabId);
+        return undefined;
+      }
+    }
+  };
+  const context = {
+    console,
+    chrome,
+    fetch: fetchImpl || (() => { throw new Error('must not fetch'); }),
+    setTimeout,
+    clearTimeout,
+    AbortController,
+    URL,
+    Uint8Array,
+    btoa: value => Buffer.from(value, 'binary').toString('base64'),
+    TextDecoder
+  };
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync('extension/background.js', 'utf8'), context);
+  assert.equal(listeners.length, 1, 'background registers exactly one onMessage listener');
+  return { listener: listeners[0], created, removed };
+}
+
+const NOTE = { title: '夹具笔记', type: 'normal', imageList: [{ urlDefault: 'https://cdn/1!nd_dft', urlPre: '', width: 1, height: 1, infoList: [] }] };
+
+test('collects a note via the hidden tab and always removes it', async () => {
+  let calls = 0;
+  const { listener, created, removed } = loadBackgroundWithTabs({
+    tabsCreate: async () => ({ id: 42 }),
+    tabsSendMessage: async (tabId, message) => {
+      calls += 1;
+      if (calls < 3) throw new Error('receiving end does not exist');
+      assert.equal(tabId, 42);
+      assert.equal(message.type, COLLECT_NOTE_MESSAGE);
+      return { ok: true, note: NOTE };
+    }
+  });
+  const response = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('no response')), 4000);
+    const handled = listener({ type: COLLECT_NOTE_VIA_TAB_MESSAGE, link: 'https://www.xiaohongshu.com/explore/abc123?xsec_token=t&xsec_source=pc_feed' }, {}, res => {
+      clearTimeout(timer);
+      resolve(res);
+    });
+    assert.equal(handled, true, 'listener must signal async handling');
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.note.title, '夹具笔记');
+  assert.equal(created.length, 1);
+  assert.equal(created[0].active, false, 'hidden tab, never focused');
+  assert.equal(removed.length, 1, 'tab closed after collection');
+  assert.equal(removed[0], 42);
+});
+
+test('refuses to open tabs for non-Xiaohongshu hosts', async () => {
+  let createCalls = 0;
+  const { listener, created } = loadBackgroundWithTabs({
+    tabsCreate: async () => { createCalls += 1; return { id: 1 }; },
+    tabsSendMessage: async () => ({ ok: true, note: NOTE })
+  });
+  const response = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('no response')), 2000);
+    listener({ type: COLLECT_NOTE_VIA_TAB_MESSAGE, link: 'https://example.com/explore/abc' }, {}, res => {
+      clearTimeout(timer);
+      resolve(res);
+    });
+  });
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'forbidden');
+  assert.equal(createCalls, 0);
+  assert.equal(created.length, 0);
+});
+
+test('reports no-state quickly and still closes the tab', async () => {
+  const { listener, removed } = loadBackgroundWithTabs({
+    tabsCreate: async () => ({ id: 7 }),
+    tabsSendMessage: async () => ({ ok: false, error: 'no-state' })
+  });
+  const response = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('no response')), 2000);
+    listener({ type: COLLECT_NOTE_VIA_TAB_MESSAGE, link: 'https://www.xiaohongshu.com/explore/abc123?xsec_token=t' }, {}, res => {
+      clearTimeout(timer);
+      resolve(res);
+    });
+  });
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'no-state');
+  assert.equal(removed.length, 1);
+  assert.equal(removed[0], 7);
+});
+
+test('reports tab-create failures instead of hanging', async () => {
+  const { listener } = loadBackgroundWithTabs({
+    tabsCreate: async () => { throw new Error('cannot create'); },
+    tabsSendMessage: async () => { throw new Error('must not send'); }
+  });
+  const response = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('no response')), 2000);
+    listener({ type: COLLECT_NOTE_VIA_TAB_MESSAGE, link: 'https://www.xiaohongshu.com/explore/abc123?xsec_token=t' }, {}, res => {
+      clearTimeout(timer);
+      resolve(res);
+    });
+  });
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'tab-create-failed');
+});

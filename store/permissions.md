@@ -6,7 +6,7 @@
 
 ### `storage`
 保存扩展自身的本地数据：内容库（XHS_ALL_IN_ONE）连接配置（服务器地址、用户名、账号 ID、密码、refresh token）。全部写入 `chrome.storage.local`，仅存于用户本机，不与 Google/Microsoft 账号同步，网页脚本无法读取。
-（注：笔记“热门阈值”和“只显示热门”开关与油猴版本一致，旧版 localStorage 键会自动迁移到扩展本地存储；不含任何账号或凭据。）
+（注：笔记“热门阈值”和“只显示热门”开关与油猴版本一致，旧版 localStorage 键会自动迁移到扩展本地存储；批量下载的范围（封面/内图/全部）与组织方式（按笔记文件夹/平铺单层）同样保存在此，批量勾选列表则只保存在浏览器会话级 `chrome.storage.session` 中，关闭浏览器即清空；不含任何账号或凭据。）
 
 ### `declarativeNetRequestWithHostAccess`
 为发往小红书图片 CDN（`*.xhscdn.com`、`ci.xiaohongshu.com`）的请求设置 `Referer: https://www.xiaohongshu.com/`。小红书 CDN 会对无 Referer 的请求拒绝出图；扩展后台服务无法可靠地通过 fetch 设置 Referer，因此使用声明式规则。
@@ -33,7 +33,10 @@
 ### `https://www.xiaohongshu.com/explore*`
 ### `https://www.xiaohongshu.com/discovery/item/*`
 
-只在小红书网页版生效：高亮热门笔记、插入复制/下载/保存按钮、跳转控件。不在任何其他站点注入。
+只在小红书网页版生效：高亮热门笔记、插入复制/下载/保存按钮、跳转控件、批量勾选复选框、底部批量下载栏。不在任何其他站点注入。
+批量下载笔记图片时，所需的内图来自笔记的服务端渲染详情页（`/explore/<id>`）：后台服务**带浏览器 cookie** 读取该 HTML 中的内联 `__INITIAL_STATE__`（直拉失败时降级为后台隐藏标签页复核）；同一笔记不引用其它账号数据。
+
+> 批量下载不申请任何新增权限（不使用 `downloads`）：zip 在用户本机生成（stored 条目 + CRC32，纯 JS 实现，无压缩），通过浏览器的单次下载手势保存到本地。内图与封面字节均仅从小红书 CDN 读取。
 
 ## 不申请的权限
 

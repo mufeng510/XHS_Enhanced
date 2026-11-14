@@ -19,8 +19,23 @@
       'xhs-enhanced:library-password': 'secret123'
     };
     (function () {
+      const jpegBytes = new Uint8Array(64);
+      jpegBytes.set([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00]);
+      for (let i = 26; i < jpegBytes.length; i += 1) jpegBytes[i] = (i * 31) & 0xff;
+      const FAKE_JPEG_BASE64 = btoa(String.fromCharCode.apply(null, Array.from(jpegBytes)));
       const store = globalThis.__XHS_CHROME_STORE__;
       const sendMessage = message => {
+        globalThis.__XHSE_LAST_CALLS__ = globalThis.__XHSE_LAST_CALLS__ || [];
+        globalThis.__XHSE_LAST_CALLS__.push(message);
+        if (message && message.responseType === 'arraybuffer') {
+          // Privileged CDN bytes: hand back a small valid JPEG for every image.
+          return Promise.resolve({ ok: true, status: 200, base64: FAKE_JPEG_BASE64, contentType: 'image/jpeg' });
+        }
+        if (message && message.responseType === 'text' && /www\.xiaohongshu\.com\/(explore|discovery\/item|search_result)\//.test(String((message && message.url) || ''))) {
+          // Note detail HTML: an inline __INITIAL_STATE__ with two images.
+          var FAKE_DETAIL_HTML = '<script>window.__INITIAL_STATE__={"note":{"noteDetailMap":{"noteimage0000000000000000000001":{"note":{"title":"夹具笔记","type":"normal","noteId":"noteimage0000000000000000000001","imageList":[{"urlDefault":"https://sns-webpic-qc.xhscdn.com/202611132144/553a05a514ffa1c204f875a3ac4c942a/1040g2sg100000000000000000000000000000aa01!nd_dft_wlteh_webp_3","urlPre":"","infoList":[]},{"urlDefault":"https://sns-webpic-qc.xhscdn.com/202611132144/553a05a514ffa1c204f875a3ac4c942a/1040g2sg200000000000000000000000000000bb02!nd_dft_wlteh_webp_3","urlPre":"","infoList":[]}]}}}}}</' + 'script>';
+          return Promise.resolve({ ok: true, status: 200, contentType: 'text/html', text: FAKE_DETAIL_HTML });
+        }
         const url = String((message && message.url) || '');
         let status = 404;
         let body = '{}';
@@ -37,8 +52,6 @@
           status = 200;
           body = '{"status":"ok"}';
         }
-        globalThis.__XHSE_LAST_CALLS__ = globalThis.__XHSE_LAST_CALLS__ || [];
-        globalThis.__XHSE_LAST_CALLS__.push(message);
         return Promise.resolve({ ok: status >= 200 && status < 300, status, text: body, contentType: 'application/json' });
       };
       globalThis.chrome = {
@@ -73,6 +86,20 @@
               globalThis.chrome.storage.onChanged._emit(changes);
             },
             async remove(keys) { for (const key of [].concat(keys)) delete store[key]; }
+          },
+          session: {
+            _store: {},
+            async get(keys) {
+              if (keys == null) return Object.assign({}, this._store);
+              const wanted = Array.isArray(keys) ? keys : [keys];
+              const out = {};
+              for (const key of wanted) if (Object.prototype.hasOwnProperty.call(this._store, key)) out[key] = this._store[key];
+              return out;
+            },
+            async set(patch) {
+              for (const [key, value] of Object.entries(patch)) this._store[key] = value;
+            },
+            async remove(keys) { for (const key of [].concat(keys)) delete this._store[key]; }
           }
         },
         permissions: {

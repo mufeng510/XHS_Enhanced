@@ -9,10 +9,10 @@ npm install
 npm run build          # 生成 extension/content.js、options.js、background.js
 npm test               # check + 单测 + 浏览器 harness（见下方说明）
 # 打包时排除 Chrome 运行时生成的缓存目录：
-cd extension && zip -r ../xhs-enhanced-extension-v2.0.0.zip . -x '.*' '_metadata/*' && cd ..
+cd extension && zip -r ../xhs-enhanced-extension-v2.1.0.zip . -x '.*' '_metadata/*' && cd ..
 ```
 
-上传物：`xhs-enhanced-extension-v2.0.0.zip`（包含 manifest.json、content.js、options.js/html/css、background.js、rules.json、icons/）。
+上传物：`xhs-enhanced-extension-v2.1.0.zip`（包含 manifest.json（2.1.0）、content.js、options.js/html/css、background.js、rules.json、icons/）。
 
 ## 1. Chrome Web Store（https://chrome.google.com/webstore/devconsole）
 

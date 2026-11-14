@@ -1,6 +1,8 @@
 (() => {
   // src/lib/remote.js
   var FETCH_MESSAGE = "xhs-enhanced:fetch";
+  var COLLECT_NOTE_VIA_TAB_MESSAGE = "xhs-enhanced:collect-note-via-tab";
+  var COLLECT_NOTE_MESSAGE = "xhs-enhanced:collect-note";
 
   // src/background/index.js
   var MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -115,9 +117,74 @@
       clearTimeout(timer);
     }
   }
+  function sleep(ms) {
+    return new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    });
+  }
+  async function handleCollectNoteViaTab(request) {
+    const link = String(request && request.link || "");
+    if (!/^https:\/\/(?:[a-z0-9-]+\.)+xiaohongshu\.com\//i.test(link)) {
+      return { ok: false, error: "forbidden" };
+    }
+    const tabsApi = chrome.tabs;
+    if (!tabsApi || typeof tabsApi.create !== "function" || typeof tabsApi.sendMessage !== "function") {
+      return { ok: false, error: "unavailable" };
+    }
+    let tab;
+    try {
+      tab = await tabsApi.create({ url: link, active: false });
+    } catch (_) {
+      return { ok: false, error: "tab-create-failed" };
+    }
+    const tabId = tab && typeof tab.id === "number" ? tab.id : null;
+    if (tabId == null) {
+      try {
+        if (tabsApi.remove) await tabsApi.remove(tab.id);
+      } catch (_) {
+      }
+      return { ok: false, error: "tab-create-failed" };
+    }
+    try {
+      const deadline = Date.now() + 25e3;
+      let lastError = "timeout";
+      while (Date.now() < deadline) {
+        try {
+          const response = await tabsApi.sendMessage(tabId, { type: COLLECT_NOTE_MESSAGE });
+          if (response && response.ok && response.note && Array.isArray(response.note.imageList)) {
+            return { ok: true, note: response.note, source: "tab" };
+          }
+          lastError = response && response.error || "no-state";
+          if (response && response.error === "no-state") break;
+          await sleep(700);
+        } catch (_) {
+          lastError = "unreachable";
+          await sleep(400);
+        }
+      }
+      return { ok: false, error: lastError };
+    } finally {
+      try {
+        await tabsApi.remove(tabId);
+      } catch (_) {
+      }
+    }
+  }
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (!message || message.type !== FETCH_MESSAGE) return void 0;
-    handleFetch(message, sender || {}).then(sendResponse, () => sendResponse({ ok: false, status: 0, error: "network" }));
-    return true;
+    if (!message) return void 0;
+    if (message.type === FETCH_MESSAGE) {
+      handleFetch(message, sender || {}).then(sendResponse, () => sendResponse({ ok: false, status: 0, error: "network" }));
+      return true;
+    }
+    if (message.type === COLLECT_NOTE_VIA_TAB_MESSAGE) {
+      const runtimeId = chrome.runtime && chrome.runtime.id;
+      if (runtimeId && sender && sender.id && sender.id !== runtimeId) {
+        sendResponse({ ok: false, error: "forbidden" });
+        return false;
+      }
+      handleCollectNoteViaTab(message).then(sendResponse, () => sendResponse({ ok: false, error: "network" }));
+      return true;
+    }
+    return void 0;
   });
 })();

@@ -3,7 +3,7 @@
 //     page (content libraries reject page-origin CORS; CDN bytes need host
 //     permissions). Binary payloads travel base64-encoded.
 //  2. Nothing else. No remote state, no analytics, no bookkeeping.
-import { FETCH_MESSAGE } from '../lib/remote.js';
+import { FETCH_MESSAGE, COLLECT_NOTE_VIA_TAB_MESSAGE, COLLECT_NOTE_MESSAGE } from '../lib/remote.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024; // 32 MiB cap for cover downloads/copies
 // Static allow-list: read-only image fetches from the XHS CDN. Everything else —
@@ -132,8 +132,79 @@ async function handleFetch(request, sender) {
   }
 }
 
+// Hidden-tab fallback for the batch downloader: when a direct SW fetch of a
+// note page does not yield usable data (login redirect, bot wall, mark-up
+// drift), open the note in a background tab where the content script parses
+// its own DOM and answers by message. The tab is always removed afterwards.
+// chrome.tabs.create/remove need no "tabs" permission; no tab.url is read.
+function sleep(ms) {
+  return new Promise(resolve => { setTimeout(resolve, ms); });
+}
+
+async function handleCollectNoteViaTab(request) {
+  const link = String((request && request.link) || '');
+  if (!/^https:\/\/(?:[a-z0-9-]+\.)+xiaohongshu\.com\//i.test(link)) {
+    return { ok: false, error: 'forbidden' };
+  }
+  const tabsApi = chrome.tabs;
+  if (!tabsApi || typeof tabsApi.create !== 'function' || typeof tabsApi.sendMessage !== 'function') {
+    return { ok: false, error: 'unavailable' };
+  }
+  let tab;
+  try {
+    tab = await tabsApi.create({ url: link, active: false });
+  } catch (_) {
+    return { ok: false, error: 'tab-create-failed' };
+  }
+  const tabId = tab && typeof tab.id === 'number' ? tab.id : null;
+  if (tabId == null) {
+    try { if (tabsApi.remove) await tabsApi.remove(tab.id); } catch (_) {}
+    return { ok: false, error: 'tab-create-failed' };
+  }
+  try {
+    const deadline = Date.now() + 25000;
+    let lastError = 'timeout';
+    // Poll: the content script registers its onMessage handler at
+    // document_idle, so early attempts reject with "receiving end does not
+    // exist" until the note page is ready — or the network stack hangs.
+    while (Date.now() < deadline) {
+      try {
+        const response = await tabsApi.sendMessage(tabId, { type: COLLECT_NOTE_MESSAGE });
+        if (response && response.ok && response.note && Array.isArray(response.note.imageList)) {
+          return { ok: true, note: response.note, source: 'tab' };
+        }
+        lastError = (response && response.error) || 'no-state';
+        if (response && response.error === 'no-state') break;
+        // A truthy non-ok response without a known error: retry once in case
+        // the hydration is still warming up, then give up.
+        await sleep(700);
+      } catch (_) {
+        lastError = 'unreachable';
+        await sleep(400);
+      }
+    }
+    return { ok: false, error: lastError };
+  } finally {
+    try { await tabsApi.remove(tabId); } catch (_) {}
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || message.type !== FETCH_MESSAGE) return undefined;
-  handleFetch(message, sender || {}).then(sendResponse, () => sendResponse({ ok: false, status: 0, error: 'network' }));
-  return true; // async response
+  if (!message) return undefined;
+  if (message.type === FETCH_MESSAGE) {
+    handleFetch(message, sender || {}).then(sendResponse, () => sendResponse({ ok: false, status: 0, error: 'network' }));
+    return true; // async response
+  }
+  if (message.type === COLLECT_NOTE_VIA_TAB_MESSAGE) {
+    // Same sender guard as the fetch path: this extension only, never other
+    // extensions or web pages.
+    const runtimeId = chrome.runtime && chrome.runtime.id;
+    if (runtimeId && sender && sender.id && sender.id !== runtimeId) {
+      sendResponse({ ok: false, error: 'forbidden' });
+      return false;
+    }
+    handleCollectNoteViaTab(message).then(sendResponse, () => sendResponse({ ok: false, error: 'network' }));
+    return true; // async response
+  }
+  return undefined;
 });

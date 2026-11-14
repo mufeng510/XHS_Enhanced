@@ -9,7 +9,9 @@ import { getChrome, getLocalStorage } from './env.js';
 import { normalizeSpace } from './text.js';
 import {
   DEFAULT_THRESHOLD,
-  parseThreshold
+  parseThreshold,
+  normalizeBatchScope,
+  normalizeBatchLayout
 } from './pure.js';
 
 export const LIBRARY_BASE_URL_KEY = 'xhs-enhanced:library-base-url';
@@ -19,6 +21,8 @@ export const LIBRARY_PASSWORD_KEY = 'xhs-enhanced:library-password';
 export const LIBRARY_REFRESH_KEY = 'xhs-enhanced:library-refresh-token';
 export const THRESHOLD_KEY = 'xhs-enhanced:popular-threshold';
 export const FOCUS_KEY = 'xhs-enhanced:focus-popular';
+export const BATCH_SCOPE_KEY = 'xhs-enhanced:batch-scope';
+export const BATCH_LAYOUT_KEY = 'xhs-enhanced:batch-layout';
 export const LIBRARY_KEYS = Object.freeze([
   LIBRARY_BASE_URL_KEY,
   LIBRARY_USERNAME_KEY,
@@ -30,7 +34,7 @@ export const LIBRARY_KEYS = Object.freeze([
 // and kept fresh via storage.onChanged. Deliberately separate from
 // LIBRARY_KEYS: "清除内容库设置" must not wipe user preferences, and vice
 // versa.
-export const PREF_KEYS = Object.freeze([THRESHOLD_KEY, FOCUS_KEY]);
+export const PREF_KEYS = Object.freeze([THRESHOLD_KEY, FOCUS_KEY, BATCH_SCOPE_KEY, BATCH_LAYOUT_KEY]);
 export const STORAGE_KEYS = Object.freeze(LIBRARY_KEYS.concat(PREF_KEYS));
 
 function chromeStorage() {
@@ -55,6 +59,8 @@ let libraryHydrated = false;
 // Preferences shared with the options page (threshold, focus mode).
 let thresholdCache = DEFAULT_THRESHOLD;
 let focusCache = false;
+let batchScopeCache = 'all';
+let batchLayoutCache = 'notes';
 
 function parseThresholdSafe(value) {
   if (value == null) return DEFAULT_THRESHOLD;
@@ -138,6 +144,8 @@ function subscribeToChanges() {
         else if (key === LIBRARY_REFRESH_KEY) libraryCache.refreshToken = value == null ? '' : String(value);
         else if (key === THRESHOLD_KEY) thresholdCache = parseThresholdSafe(value);
         else if (key === FOCUS_KEY) focusCache = value === true || value === '1';
+        else if (key === BATCH_SCOPE_KEY) batchScopeCache = normalizeBatchScope(value);
+        else if (key === BATCH_LAYOUT_KEY) batchLayoutCache = normalizeBatchLayout(value);
       }
     });
   } catch (_) {}
@@ -157,6 +165,8 @@ async function hydrate() {
     });
     thresholdCache = parseThresholdSafe(readLocal(THRESHOLD_KEY));
     focusCache = readLocal(FOCUS_KEY) === '1';
+    batchScopeCache = normalizeBatchScope(readLocal(BATCH_SCOPE_KEY));
+    batchLayoutCache = normalizeBatchLayout(readLocal(BATCH_LAYOUT_KEY));
     libraryHydrated = true;
     return;
   }
@@ -169,6 +179,8 @@ async function hydrate() {
   applyLibraryItems(items);
   thresholdCache = parseThresholdSafe(items[THRESHOLD_KEY]);
   focusCache = items[FOCUS_KEY] === true || items[FOCUS_KEY] === '1';
+  batchScopeCache = normalizeBatchScope(items[BATCH_SCOPE_KEY]);
+  batchLayoutCache = normalizeBatchLayout(items[BATCH_LAYOUT_KEY]);
   const legacy = migrateLegacyLocalStorage();
   // Preference keys: the userscript kept them in page localStorage. The
   // options page is a different origin, so move them into chrome.storage.
@@ -185,6 +197,8 @@ async function hydrate() {
         if (key === LIBRARY_ACCOUNT_ID_KEY) libraryCache.accountId = Number(value) || 0;
         if (key === THRESHOLD_KEY) thresholdCache = parseThresholdSafe(value);
         if (key === FOCUS_KEY) focusCache = value === '1';
+        if (key === BATCH_SCOPE_KEY) batchScopeCache = normalizeBatchScope(value);
+        if (key === BATCH_LAYOUT_KEY) batchLayoutCache = normalizeBatchLayout(value);
       }
     }
     if (Object.keys(patch).length) {
@@ -350,4 +364,47 @@ export function writeStoredThreshold(value) {
 export function writeStoredFocusPopular(value) {
   focusCache = Boolean(value);
   return { ok: true, value: focusCache, persisted: persistLibrary({ [FOCUS_KEY]: focusCache ? '1' : '0' }) };
+}
+
+// --- Batch download scope ----------------------------------------------------
+// Kept beside the threshold/focus prefs: same hydration/migration path. The
+// options page does not surface it (scope is chosen in the batch bar itself),
+// so it is hydrated the same way but has no dedicated writer UI elsewhere.
+export function readStoredBatchScope(storage) {
+  if (storage !== undefined) {
+    if (!storage) return 'all';
+    try {
+      return normalizeBatchScope(storage.getItem(BATCH_SCOPE_KEY));
+    } catch (_) {
+      return 'all';
+    }
+  }
+  return batchScopeCache;
+}
+
+// Persist a scope. Returns { ok, value, persisted }.
+export function writeStoredBatchScope(value) {
+  batchScopeCache = normalizeBatchScope(value);
+  return { ok: true, value: batchScopeCache, persisted: persistLibrary({ [BATCH_SCOPE_KEY]: batchScopeCache }) };
+}
+
+// --- Batch download layout ---------------------------------------------------
+// Same hydration path as the batch scope. Read by the batch downloader at
+// packaging time; written on the options page (批量下载组织方式).
+export function readStoredBatchLayout(storage) {
+  if (storage !== undefined) {
+    if (!storage) return 'notes';
+    try {
+      return normalizeBatchLayout(storage.getItem(BATCH_LAYOUT_KEY));
+    } catch (_) {
+      return 'notes';
+    }
+  }
+  return batchLayoutCache;
+}
+
+// Persist a layout. Returns { ok, value, persisted }.
+export function writeStoredBatchLayout(value) {
+  batchLayoutCache = normalizeBatchLayout(value);
+  return { ok: true, value: batchLayoutCache, persisted: persistLibrary({ [BATCH_LAYOUT_KEY]: batchLayoutCache }) };
 }

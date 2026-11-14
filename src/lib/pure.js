@@ -148,9 +148,10 @@ export function findTokenForNoteIdInState(value, noteId, depth, seen) {
 
 // Scan inline <script> text for the serialized __INITIAL_STATE__ object and
 // parse it. Returns null when no usable script exists (callers then fall back
-// to the script-text regexes). `undefined` literals are valid in the XHS
-// serialization but not in JSON, so they degrade to null before parsing —
-// first strict JSON.parse, then the undefined→null rewrite as a fallback.
+// to the script-text regexes). XHS serializes some fields as JS literals —
+// `undefined` and `new Map([])` are valid for the page but not for JSON, so
+// they degrade to null before parsing. Strict parse first, then progressively
+// looser rewrites.
 export function parseInitialStateFromScriptText(text) {
   const source = String(text == null ? '' : text);
   if (!source || source.indexOf('__INITIAL_STATE__') < 0) return null;
@@ -159,7 +160,7 @@ export function parseInitialStateFromScriptText(text) {
   if (eq < 0) return null;
   let start = eq + 1;
   while (start < source.length && source[start] !== '{' && source[start] !== '[') {
-    // Skip whitespace and newlines; bail on anything else before the payload.
+    // Skip whitespace and newlines; bail on anything before the payload.
     if (!/[\s]/.test(source[start])) {
       if (/[a-zA-Z_$]/.test(source[start])) return null;
     }
@@ -172,11 +173,17 @@ export function parseInitialStateFromScriptText(text) {
   try {
     return JSON.parse(jsonText);
   } catch (_) {
-    try {
-      return JSON.parse(jsonText.replace(/\bundefined\b/g, 'null'));
-    } catch (__) {
-      return null;
+    const fixes = [
+      value => value.replace(/\bundefined\b/g, 'null'),
+      value => value.replace(/\bundefined\b/g, 'null').replace(/\bnew\s+(?:Map|Set)\(\s*\[\s*\]\s*\)/g, 'null'),
+      value => value.replace(/\bundefined\b/g, 'null').replace(/\bnew\s+(?:Map|Set)\(\s*\[[\s\S]*?\]\s*\)/g, 'null')
+    ];
+    for (const fix of fixes) {
+      try {
+        return JSON.parse(fix(jsonText));
+      } catch (__) { /* try the next, looser rewrite */ }
     }
+    return null;
   }
 }
 
@@ -202,6 +209,98 @@ function scanBalancedObject(source, start) {
     }
   }
   return -1;
+}
+
+// Slim a note from the __INITIAL_STATE__ payload down to what the batch
+// downloader needs, so it can cross the runtime message boundary without
+// dragging megabytes of unrelated state along. Returns null when the note
+// or its imageList is missing.
+export function slimNoteDetail(note) {
+  const value = note && typeof note === 'object' ? note : null;
+  if (!value) return null;
+  const rawList = Array.isArray(value.imageList) ? value.imageList : [];
+  const imageList = [];
+  for (const item of rawList) {
+    if (!item || typeof item !== 'object') continue;
+    const infoList = [];
+    if (Array.isArray(item.infoList)) {
+      for (const entry of item.infoList) {
+        if (!entry || typeof entry !== 'object') continue;
+        const url = String(entry.url || '');
+        if (!url) continue;
+        infoList.push({ imageScene: String(entry.imageScene || ''), url });
+      }
+    }
+    imageList.push({
+      urlDefault: String(item.urlDefault || ''),
+      urlPre: String(item.urlPre || ''),
+      width: Number(item.width) || 0,
+      height: Number(item.height) || 0,
+      infoList
+    });
+  }
+  return {
+    title: String(value.title || ''),
+    type: String(value.type || ''),
+    imageList
+  };
+}
+
+// Extract the note detail out of a server-rendered note page, given its raw
+// HTML text (SW fetch path). Returns { title, type, imageList } or null when
+// the HTML does not carry a usable __INITIAL_STATE__ (login redirect, bot
+// wall, mark-up change) so callers can fall back to a hidden tab.
+// Batch-download layout preference. 'notes' (default) keeps the per-note
+// folder; 'flat' drops every image into a single folder instead.
+export const BATCH_LAYOUT_VALUES = Object.freeze(['notes', 'flat']);
+export function normalizeBatchLayout(value) {
+  const text = String(value == null ? '' : value).trim().toLowerCase();
+  return text === 'flat' ? 'flat' : 'notes';
+}
+
+// Batch-download scope preference. 'all' is the safe default (cover + inner);
+// anything unexpected degrades to it rather than downloading nothing.
+export const BATCH_SCOPE_VALUES = Object.freeze(['cover', 'inner', 'all']);
+export function normalizeBatchScope(value) {
+  const text = String(value == null ? '' : value).trim().toLowerCase();
+  return text === 'cover' || text === 'inner' ? text : 'all';
+}
+
+export function extractNoteFromInitialStateHtml(htmlText) {
+  const text = String(htmlText == null ? '' : htmlText);
+  const marker = '__INITIAL_STATE__=';
+  const anchor = text.indexOf(marker);
+  if (anchor < 0) return null;
+  const scriptStart = text.lastIndexOf('<script', anchor);
+  const scriptEnd = text.indexOf('</script>', anchor);
+  if (scriptStart < 0 || scriptEnd < 0) return null;
+  const openTagEnd = text.indexOf('>', scriptStart);
+  if (openTagEnd < 0 || openTagEnd >= scriptEnd) return null;
+  const scriptText = text.slice(openTagEnd + 1, scriptEnd);
+  const state = parseInitialStateFromScriptText(scriptText);
+  const noteMap = state && state.note && state.note.noteDetailMap;
+  if (!noteMap || typeof noteMap !== 'object') return null;
+  const first = Object.values(noteMap)[0];
+  const note = first && first.note;
+  return slimNoteDetail(note);
+}
+
+// Best URL to download an imageList entry with, in priority order: the
+// default (transcoded, browser-friendly) rendition, then the preview, then
+// the named WB_* scenes from infoList. Masters are reached separately via
+// coverUrlCandidates(), so plain urlDefault variants are enough here.
+export function pickBestImageUrl(image) {
+  if (!image || typeof image !== 'object') return '';
+  const direct = String(image.urlDefault || '').trim() || String(image.urlPre || '').trim();
+  if (direct) return direct;
+  const list = Array.isArray(image.infoList) ? image.infoList : [];
+  const preferred = ['WB_DFT', 'WB_PRV', 'WB_BIG'];
+  for (const scene of preferred) {
+    const hit = list.find(entry => entry && String(entry.imageScene || '').toUpperCase() === scene && entry.url);
+    if (hit) return String(hit.url).trim();
+  }
+  const any = list.find(entry => entry && entry.url);
+  return any ? String(any.url).trim() : '';
 }
 
 

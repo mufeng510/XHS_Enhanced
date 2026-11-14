@@ -323,6 +323,188 @@
     node.append(link, like); return node;
   }
 
+  async function batchSelectionAndDownload() {
+    api.clearTestSelection();
+    api.setTestRoute('/search_result?keyword=test');
+    await useFixture('search-source', '#search-fixture');
+    api.scan(); await checkpoint();
+    // Link-bearing cards get checkboxes; the no-link card does not.
+    const reliableCases = ['99', '100', '101', 'comma', 'wan', 'w', 'k', 'bad', 'two-numbers', 'search-dual-anchor'];
+    for (const name of reliableCases) {
+      assert(card(name).querySelector('.xhs-enhanced-checkbox'), `checkbox injected: ${name}`);
+    }
+    assert(!card('no-link').querySelector('.xhs-enhanced-checkbox'), 'card without note id gets no checkbox');
+    const countNode = document.getElementById('xhs-enhanced-batch-count');
+    assert(countNode, 'batch bar rendered');
+    assert(countNode.textContent.includes('0'), 'bar starts at zero');
+    // Toggle two cards on, then off again via the same boxes.
+    card('99').querySelector('.xhs-enhanced-checkbox').click();
+    card('100').querySelector('.xhs-enhanced-checkbox').click();
+    await checkpoint();
+    assert(card('99').querySelector('.xhs-enhanced-checkbox').getAttribute('aria-checked') === 'true', 'card 99 checked');
+    assert(countNode.textContent.includes('2'), 'bar shows 已选 2');
+    card('99').querySelector('.xhs-enhanced-checkbox').click();
+    await checkpoint();
+    assert(countNode.textContent.includes('1'), 'bar shows 已选 1 after unchecking');
+    // 全选已加载 → 全部已加载卡入选；再点一次 → 取消已加载勾选。
+    const selectLoaded = document.getElementById('xhs-enhanced-batch-select-loaded');
+    selectLoaded.click();
+    await checkpoint();
+    assert(countNode.textContent.includes('10'), 'select-all selects all loaded link-bearing cards', countNode.textContent);
+    assert(selectLoaded.getAttribute('aria-pressed') === 'true', 'select-all marked pressed');
+    selectLoaded.click();
+    await checkpoint();
+    assert(countNode.textContent.includes('0'), 'select-all toggles off for loaded cards');
+    // 清空 button clears a mixed selection.
+    card('99').querySelector('.xhs-enhanced-checkbox').click();
+    card('search-dual-anchor').querySelector('.xhs-enhanced-checkbox').click();
+    await checkpoint();
+    document.getElementById('xhs-enhanced-batch-clear').click();
+    await checkpoint();
+    assert(countNode.textContent.includes('0'), 'clear empties the selection');
+    // 连续勾选: newly scanned cards are auto-checked without further clicks.
+    const continuous = document.getElementById('xhs-enhanced-batch-continuous');
+    continuous.click();
+    assert(continuous.getAttribute('aria-pressed') === 'true', 'continuous mode toggled on');
+    api.scan(); await checkpoint();
+    const autoChecked = sandbox.querySelectorAll('.xhs-enhanced-checkbox[aria-checked="true"]').length;
+    assert(autoChecked === 10, 'continuous mode auto-selects loaded cards', `checked=${autoChecked}`);
+    continuous.click();
+    assert(continuous.getAttribute('aria-pressed') === 'false', 'continuous mode toggled off');
+    // 下载已选: the fake CDN serves a small valid JPEG; anchor is intercepted.
+    const zipBlobs = [];
+    const anchorClicks = [];
+    const originalCreateObjectURL = URL.createObjectURL.bind(URL);
+    const originalAnchorClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = blob => { zipBlobs.push(blob); return 'blob:xhs-enhanced-mock-' + zipBlobs.length; };
+    HTMLAnchorElement.prototype.click = function recordClick() { anchorClicks.push({ download: this.download, href: this.href }); };
+    document.getElementById('xhs-enhanced-batch-download').click();
+    await checkpoint();
+    await delay(100);
+    URL.createObjectURL = originalCreateObjectURL;
+    HTMLAnchorElement.prototype.click = originalAnchorClick;
+    assert(anchorClicks.length === 1, 'exactly one zip download triggered', `clicks=${anchorClicks.length}`);
+    assert(/^XHS笔记_\d{8}_\d{4}_\d+篇\.zip$/.test(anchorClicks[0].download || ''), 'zip filename follows the template', anchorClicks[0].download);
+    assert(zipBlobs.length === 1 && zipBlobs[0].type === 'application/zip' && zipBlobs[0].size > 64, 'zip blob built from fetched covers');
+    api.clearTestSelection();
+    assert(countNode.textContent.includes('0'), 'test clears its own selection');
+  }
+
+  async function batchScopeModeAndInnerImages() {
+    api.clearTestSelection();
+    api.setBatchScope('all');
+    api.setTestRoute('/search_result?keyword=test');
+    await useFixture('search-source', '#search-fixture');
+    api.scan(); await checkpoint();
+    // Scope segmented control renders; default is all.
+    const coverBtn = document.getElementById('xhs-enhanced-batch-scope-cover');
+    const innerBtn = document.getElementById('xhs-enhanced-batch-scope-inner');
+    const allBtn = document.getElementById('xhs-enhanced-batch-scope-all');
+    assert(coverBtn && innerBtn && allBtn, 'scope segmented control rendered');
+    assert(allBtn.getAttribute('aria-pressed') === 'true', 'default scope is all');
+    // Cover scope: the dual-anchor card's own data: image is downloaded.
+    coverBtn.click();
+    await checkpoint();
+    assert(coverBtn.getAttribute('aria-pressed') === 'true' && allBtn.getAttribute('aria-pressed') === 'false', 'scope switches to cover');
+    card('search-dual-anchor').querySelector('.xhs-enhanced-checkbox').click();
+    await checkpoint();
+    let anchorClicks = [];
+    let zipBlobs = [];
+    const originalCreateObjectURL = URL.createObjectURL.bind(URL);
+    const originalAnchorClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = blob => { zipBlobs.push(blob); return 'blob:xhs-enhanced-scope-' + zipBlobs.length; };
+    HTMLAnchorElement.prototype.click = function recordClick() { anchorClicks.push({ download: this.download }); };
+    document.getElementById('xhs-enhanced-batch-download').click();
+    await checkpoint();
+    await delay(250);
+    URL.createObjectURL = originalCreateObjectURL;
+    HTMLAnchorElement.prototype.click = originalAnchorClick;
+    assert(anchorClicks.length === 1, 'cover scope downloads exactly one zip');
+    assert(zipBlobs.length === 1 && zipBlobs[0].type === 'application/zip', 'cover scope zip built');
+    // Inner scope: images come from the note detail (fetchBytes text mock), not the card cover.
+    innerBtn.click();
+    await checkpoint();
+    assert(innerBtn.getAttribute('aria-pressed') === 'true', 'scope switches to inner');
+    anchorClicks = [];
+    zipBlobs = [];
+    URL.createObjectURL = blob => { zipBlobs.push(blob); return 'blob:xhs-enhanced-scope2-' + zipBlobs.length; };
+    HTMLAnchorElement.prototype.click = function recordClick() { anchorClicks.push({ download: this.download }); };
+    document.getElementById('xhs-enhanced-batch-download').click();
+    await checkpoint();
+    await delay(250);
+    URL.createObjectURL = originalCreateObjectURL;
+    HTMLAnchorElement.prototype.click = originalAnchorClick;
+    const innerToast = () => {
+      const node = document.getElementById('xhs-enhanced-copy-status');
+      return node ? node.textContent : '';
+    };
+    assert(anchorClicks.length === 1, 'inner scope downloads exactly one zip', 'toast=' + innerToast() + ' clicks=' + anchorClicks.length);
+    // The detail fixture carries two images; the card's data: cover must NOT be in there.
+    assert(zipBlobs.length === 1 && zipBlobs[0].size > 120, 'inner scope zip holds detail images, not the card cover');
+    // All scope: cover + inner = 3 images (card cover + 2 detail images)... note detail drives imageList[0] as cover.
+    allBtn.click();
+    await checkpoint();
+    assert(allBtn.getAttribute('aria-pressed') === 'true', 'scope switches to all');
+    anchorClicks = [];
+    zipBlobs = [];
+    URL.createObjectURL = blob => { zipBlobs.push(blob); return 'blob:xhs-enhanced-scope3-' + zipBlobs.length; };
+    HTMLAnchorElement.prototype.click = function recordClick() { anchorClicks.push({ download: this.download }); };
+    document.getElementById('xhs-enhanced-batch-download').click();
+    await checkpoint();
+    await delay(250);
+    URL.createObjectURL = originalCreateObjectURL;
+    HTMLAnchorElement.prototype.click = originalAnchorClick;
+    assert(anchorClicks.length === 1, 'all scope downloads exactly one zip');
+    assert(zipBlobs.length === 1 && zipBlobs[0].size > 150, 'all scope zip holds cover + inner images');
+    api.clearTestSelection();
+    api.setBatchScope('all');
+  }
+
+  async function readZipNames(blob) {
+    const buffer = await blob.arrayBuffer();
+    const view = new DataView(buffer);
+    const names = [];
+    let offset = 0;
+    while (offset + 4 <= buffer.byteLength && view.getUint32(offset, true) === 0x04034b50) {
+      const size = view.getUint32(offset + 18, true);
+      const nameLen = view.getUint16(offset + 26, true);
+      const extraLen = view.getUint16(offset + 28, true);
+      names.push(new TextDecoder().decode(new Uint8Array(buffer, offset + 30, nameLen)));
+      offset += 30 + nameLen + extraLen + size;
+    }
+    return names;
+  }
+
+  async function batchLayoutFlatMode() {
+    api.clearTestSelection();
+    api.setTestRoute('/search_result?keyword=test');
+    await useFixture('search-source', '#search-fixture');
+    api.scan(); await checkpoint();
+    api.setBatchScope('all');
+    api.setBatchLayout('flat');
+    card('search-dual-anchor').querySelector('.xhs-enhanced-checkbox').click();
+    await checkpoint();
+    const zipBlobs = [];
+    const anchorClicks = [];
+    const originalCreateObjectURL = URL.createObjectURL.bind(URL);
+    const originalAnchorClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = blob => { zipBlobs.push(blob); return 'blob:xhs-enhanced-layout-' + zipBlobs.length; };
+    HTMLAnchorElement.prototype.click = function recordClick() { anchorClicks.push({ download: this.download }); };
+    document.getElementById('xhs-enhanced-batch-download').click();
+    await checkpoint();
+    await delay(250);
+    URL.createObjectURL = originalCreateObjectURL;
+    HTMLAnchorElement.prototype.click = originalAnchorClick;
+    assert(anchorClicks.length === 1 && zipBlobs.length === 1, 'flat layout downloads exactly one zip');
+    const names = await readZipNames(zipBlobs[0]);
+    assert(names.length === 2, 'flat zip carries both detail images', JSON.stringify(names));
+    assert(names.every(name => /^001_s1_/.test(name)), 'flat names carry seq and note id', JSON.stringify(names));
+    assert(names.every(name => name.indexOf('/') === -1), 'flat layout has no folders', JSON.stringify(names));
+    api.clearTestSelection();
+    api.setBatchLayout('notes');
+    assert(api.getBatchLayoutSnapshot() === 'notes', 'layout restored to default (notes)');
+  }
+
   async function jumpNavigation() {
     api.setTestRoute('/search_result');
     const above = makeCard('jump-above', 101);
@@ -575,6 +757,9 @@
       await profile();
       await popularThresholdConfiguration();
       await librarySync();
+      await batchSelectionAndDownload();
+      await batchScopeModeAndInnerImages();
+      await batchLayoutFlatMode();
       await dynamicAndAttributes();
       await jumpNavigation();
       await focusMode();
