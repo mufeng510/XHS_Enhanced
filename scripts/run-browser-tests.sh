@@ -137,7 +137,7 @@ mkdir -p "$DUMP_PROFILE"
   --no-proxy-server \
   --allow-file-access-from-files \
   --user-data-dir="$DUMP_PROFILE" \
-  --virtual-time-budget=10000 \
+  --virtual-time-budget=22000 \
   --dump-dom "$URI" >"$DOM_DUMP" 2>/dev/null || true
 
 if is_terminal_pass "$DOM_DUMP"; then

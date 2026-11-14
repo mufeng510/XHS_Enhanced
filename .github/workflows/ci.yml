@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    name: Build & test (Node 22)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Static checks (manifest, bundles, forbidden patterns)
+        run: npm run check
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Browser harness (headless Chrome)
+        run: npm run test:browser

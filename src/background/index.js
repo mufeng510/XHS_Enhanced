@@ -6,11 +6,13 @@
 import { FETCH_MESSAGE, COLLECT_NOTE_VIA_TAB_MESSAGE, COLLECT_NOTE_MESSAGE } from '../lib/remote.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024; // 32 MiB cap for cover downloads/copies
-// Static allow-list: read-only image fetches from the XHS CDN. Everything else —
-// including any other origin, non-GET methods, or non-CDN paths — goes through
-// the optional-permission gate, which requires a user gesture on the options
-// page for the specific origin.
-const STATIC_EXACT_HOSTS = new Set(['ci.xiaohongshu.com']);
+// Static allow-list: read-only image fetches from the XHS CDN family. Anything
+// else — including any other origin, non-GET methods, or non-CDN paths — goes
+// through the optional-permission gate, which requires a user gesture on the
+// options page for the specific origin. The two *.xiaohongshu.com image hosts
+// are XHS-owned goods/note image CDNs (already covered by the manifest's
+// host_permissions); ci.xiaohongshu.com serves the no-watermark originals.
+const STATIC_EXACT_HOSTS = new Set(['ci.xiaohongshu.com', 'img.xiaohongshu.com', 'qimg.xiaohongshu.com']);
 const SAFE_METHODS = new Set(['GET', 'HEAD']);
 
 function hostOf(url) {

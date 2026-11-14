@@ -1637,8 +1637,565 @@
     });
   }
 
-  // src/content/index.js
+  // src/lib/goods.js
+  var GOODS_ROUTE_RE = /^\/goods-detail\/[^/?#]+/;
+  var IMAGE_CDN_HOST_RE = /(^|\.)xhscdn\.com$/i;
+  var IMAGE_CDN_EXACT_HOSTS = /* @__PURE__ */ new Set(["ci.xiaohongshu.com", "img.xiaohongshu.com", "qimg.xiaohongshu.com"]);
+  var STATIC_ASSET_PATH_RE = /\.(?:m?js|css|mjs|map|json|woff2?|ttf|otf|svg|html|txt)(\?|$|!)/i;
+  var STATIC_ASSET_HOST_RE = /(^|\.)(?:fe-static|formula-static)\.xhscdn\.com$/i;
+  var DECORATION_RE = /(avatar|emoji|favicon|logo|spacer|placeholder|1x1)/i;
+  var TRAILING_JUNK_RE = /(?:[.,;:!?>)]+|&[a-z#0-9]+;)$/i;
+  var URL_TEXT_RE = /https?:\/\/[^\s"'<>()\\]+/g;
+  function isGoodsDetailRoute(href) {
+    const text = String(href || "");
+    if (!text) return false;
+    let pathname = text;
+    try {
+      pathname = new URL(text, "https://www.xiaohongshu.com").pathname;
+    } catch (_) {
+      const cut = text.search(/[?#]/);
+      if (cut >= 0) pathname = text.slice(0, cut);
+    }
+    return GOODS_ROUTE_RE.test(pathname);
+  }
+  function getGoodsIdFromHref(href) {
+    const text = String(href || "");
+    let pathname = text;
+    try {
+      pathname = new URL(text, "https://www.xiaohongshu.com").pathname;
+    } catch (_) {
+      const cut = text.search(/[?#]/);
+      if (cut >= 0) pathname = text.slice(0, cut);
+    }
+    const match = pathname.match(/^\/goods-detail\/([0-9a-zA-Z_-]{6,})/);
+    return match ? match[1] : "";
+  }
+  function isXhsImageCdnUrl(url) {
+    try {
+      const u = new URL(String(url || ""));
+      if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+      const host = u.hostname.toLowerCase();
+      return IMAGE_CDN_HOST_RE.test(host) || IMAGE_CDN_EXACT_HOSTS.has(host);
+    } catch (_) {
+      return false;
+    }
+  }
+  function extractUrlsFromText(text) {
+    const source = String(text || "").replace(/\\u002[fF]/g, "/");
+    const out = [];
+    const matches = source.match(URL_TEXT_RE) || [];
+    for (const raw of matches) {
+      const trimmed = raw.replace(TRAILING_JUNK_RE, "");
+      try {
+        const u = new URL(trimmed);
+        if (u.protocol !== "https:" && u.protocol !== "http:") continue;
+        out.push(u.href);
+      } catch (_) {
+      }
+    }
+    return out;
+  }
+  function looksLikeGoodsImageUrl(url, options) {
+    if (!isXhsImageCdnUrl(url)) return false;
+    let u;
+    try {
+      u = new URL(String(url || ""));
+    } catch (_) {
+      return false;
+    }
+    const host = u.hostname.toLowerCase();
+    if (STATIC_ASSET_HOST_RE.test(host)) return false;
+    const path = u.pathname;
+    if (STATIC_ASSET_PATH_RE.test(path)) return false;
+    const includeDecorations2 = Boolean(options && options.includeDecorations);
+    if (!includeDecorations2 && DECORATION_RE.test(host + path)) return false;
+    return true;
+  }
+  function canonicalGoodsImageKey(url) {
+    try {
+      const u = new URL(String(url || ""));
+      const path = u.pathname.replace(/![^/]*$/, "");
+      return (u.hostname.toLowerCase() + path).toLowerCase();
+    } catch (_) {
+      return String(url || "");
+    }
+  }
+  function rankGoodsImageCandidate(url) {
+    const text = String(url || "");
+    const widthMatch = text.match(/\/w\/(\d{2,5})/);
+    if (!widthMatch) return 4096;
+    return Math.min(Number(widthMatch[1]) || 0, 4096);
+  }
+  function dedupeGoodsImages(urls) {
+    const bestByKey = /* @__PURE__ */ new Map();
+    const order = [];
+    for (const raw of urls || []) {
+      const url = String(raw || "").trim();
+      if (!url || !isXhsImageCdnUrl(url)) continue;
+      const key = canonicalGoodsImageKey(url);
+      const prev = bestByKey.get(key);
+      if (!prev) {
+        bestByKey.set(key, url);
+        order.push(key);
+        continue;
+      }
+      if (rankGoodsImageCandidate(url) > rankGoodsImageCandidate(prev)) {
+        bestByKey.set(key, url);
+      }
+    }
+    return order.map((key) => bestByKey.get(key));
+  }
+  function collectGoodsImageCandidates(domCandidates, textCandidates, options) {
+    const merged = [];
+    const seenAcrossLists = /* @__PURE__ */ new Set();
+    for (const url of domCandidates || []) {
+      const clean = String(url || "").trim();
+      if (!clean) continue;
+      const key = "dom:" + canonicalGoodsImageKey(clean);
+      if (seenAcrossLists.has(key)) continue;
+      seenAcrossLists.add(key);
+      merged.push(clean);
+    }
+    for (const url of textCandidates || []) {
+      const clean = String(url || "").trim();
+      if (!clean) continue;
+      merged.push(clean);
+    }
+    const filtered = merged.filter((url) => looksLikeGoodsImageUrl(url, options));
+    return dedupeGoodsImages(filtered);
+  }
+  var GOODS_FORMAT_MODES = Object.freeze([
+    { value: "png", label: "\u9AD8\u6E05 PNG" },
+    { value: "original", label: "\u539F\u59CB\u683C\u5F0F" },
+    { value: "jpeg", label: "JPEG q90" }
+  ]);
+  var GOODS_FORMAT_LABELS = Object.freeze({ png: "\u9AD8\u6E05 PNG\uFF08imageView2/2/format/png\uFF09", original: "\u539F\u59CB\u683C\u5F0F\uFF08\u4E0D\u6539\u5199\u53C2\u6570\uFF09", jpeg: "JPEG q90\uFF08imageView2/2/format/jpeg/q/90\uFF09" });
+  function toHDGoodsUrl(url, mode) {
+    const search = mode === "original" ? "" : mode === "jpeg" ? "?imageView2/2/format/jpeg/q/90" : "?imageView2/2/format/png";
+    try {
+      const u = new URL(String(url || ""));
+      if (u.protocol !== "https:" && u.protocol !== "http:") return String(url || "");
+      u.search = search;
+      return u.href;
+    } catch (_) {
+      return String(url || "");
+    }
+  }
+  function extensionForMime(mime, fallback = "png") {
+    const text = String(mime || "").toLowerCase();
+    if (/jpeg|jpg/.test(text)) return "jpg";
+    if (/png/.test(text)) return "png";
+    if (/webp/.test(text)) return "webp";
+    if (/gif/.test(text)) return "gif";
+    if (/avif/.test(text)) return "avif";
+    if (/heic/.test(text)) return "heic";
+    const safe = normalizeSpace(fallback).replace(/[^a-z0-9]/gi, "").toLowerCase();
+    return safe || "png";
+  }
+  function pad22(value) {
+    return String(value).padStart(2, "0");
+  }
+  function buildGoodsZipFileName(now, count, goodsId, partIndex = 0, partTotal = 1) {
+    const date = now && typeof now.getTime === "function" && !Number.isNaN(now.getTime()) ? now : /* @__PURE__ */ new Date();
+    const stamp = String(date.getFullYear()) + pad22(date.getMonth() + 1) + pad22(date.getDate()) + "_" + pad22(date.getHours()) + pad22(date.getMinutes());
+    const safeId = String(normalizeSpace(goodsId || "") || "unknown").replace(/[^0-9a-zA-Z_-]/g, "").slice(0, 32) || "unknown";
+    const base = `\u5C0F\u7EA2\u4E66\u5546\u54C1\u9AD8\u6E05\u56FE_${safeId}_${stamp}_${Number(count) || 0}\u5F20`;
+    return partTotal > 1 ? `${base}_part${partIndex + 1}.zip` : `${base}.zip`;
+  }
+  function buildGoodsImageFileName(index, ext) {
+    const seq = String((Number(index) || 0) + 1).padStart(2, "0");
+    const safeExt = String(ext || "png").replace(/[^a-z0-9]/gi, "").toLowerCase() || "png";
+    return `${seq}.${safeExt}`;
+  }
+  function buildGoodsInfoText(meta) {
+    const m = meta || {};
+    const lines = [
+      "\u5C0F\u7EA2\u4E66\u5546\u54C1\u9AD8\u6E05\u56FE",
+      "\u5546\u54C1\u94FE\u63A5\uFF1A" + (m.pageUrl || ""),
+      "\u5546\u54C1 ID\uFF1A" + (m.goodsId || ""),
+      "\u5546\u54C1\u6807\u9898\uFF1A" + (m.title || ""),
+      "\u626B\u63CF\u65F6\u95F4\uFF1A" + (m.scannedAt || ""),
+      "\u56FE\u7247\u6570\u91CF\uFF1A" + (Number(m.count) || 0),
+      "\u9AD8\u6E05\u683C\u5F0F\uFF1A" + (GOODS_FORMAT_LABELS[m.mode] || m.mode || ""),
+      "\u6765\u6E90\uFF1A\u5C0F\u7EA2\u4E66\u5546\u54C1\u8BE6\u60C5\u9875\uFF08\u7531\u201C\u5C0F\u7EA2\u4E66\u7F51\u9875\u7248\u589E\u5F3A\u201D\u6269\u5C55\u6279\u91CF\u5BFC\u51FA\uFF09"
+    ];
+    return lines.join("\n") + "\n";
+  }
+  function getGoodsTitleFromDocument(documentRef) {
+    try {
+      const doc = documentRef || (typeof document !== "undefined" ? document : null);
+      const raw = doc && doc.title ? String(doc.title) : "";
+      const cleaned = normalizeSpace(raw.replace(/\s*[-–_|]\s*小红书\s*$/, "").replace(/^(小红书\s*[-–_|]\s*)/, ""));
+      return cleaned;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  // src/content/goods.js
   var ROOT = getRoot();
+  var PANEL_ID = "xhs-enhanced-goods-panel";
+  var SCAN_BUTTON_ID = "xhs-enhanced-goods-scan";
+  var DOWNLOAD_BUTTON_ID = "xhs-enhanced-goods-download";
+  var COUNT_ID = "xhs-enhanced-goods-count";
+  var STATUS_ID = "xhs-enhanced-goods-status";
+  var FORMAT_ID = "xhs-enhanced-goods-format";
+  var DECOR_ID = "xhs-enhanced-goods-decorations";
+  var TITLE_TEXT = "\u{1F4F7} \u5546\u54C1\u9AD8\u6E05\u56FE\u4E0B\u8F7D";
+  var COUNT_EMPTY = "\u672A\u626B\u63CF";
+  var COUNT_FOUND_PREFIX = "\u53D1\u73B0\u9AD8\u6E05\u56FE\u7247\uFF1A";
+  var COUNT_NONE = "\u672A\u53D1\u73B0\u5C0F\u7EA2\u4E66\u5546\u54C1\u56FE\u7247";
+  var panel = null;
+  var countNode = null;
+  var statusNode = null;
+  var scanButton = null;
+  var downloadButton = null;
+  var formatSelect = null;
+  var decorToggle = null;
+  var observer = null;
+  var rescanTimer = null;
+  var autoScanTimer = null;
+  var currentImages = [];
+  var includeDecorations = false;
+  var formatMode = "png";
+  var inFlight = false;
+  function utf8Bytes(text) {
+    const source = String(text == null ? "" : text);
+    if (typeof TextEncoder !== "undefined") {
+      try {
+        return new TextEncoder().encode(source);
+      } catch (_) {
+      }
+    }
+    const bytes = [];
+    for (let i = 0; i < source.length; i += 1) {
+      const code = source.charCodeAt(i);
+      if (code < 128) bytes.push(code);
+      else if (code < 2048) bytes.push(192 | code >> 6, 128 | code & 63);
+      else bytes.push(224 | code >> 12, 128 | code >> 6 & 63, 128 | code & 63);
+    }
+    return new Uint8Array(bytes);
+  }
+  function setStatus(message) {
+    if (statusNode && statusNode.isConnected) statusNode.textContent = message || "";
+  }
+  function updateCountLabel() {
+    if (!countNode || !countNode.isConnected) return;
+    countNode.textContent = currentImages.length ? COUNT_FOUND_PREFIX + currentImages.length + " \u5F20" : COUNT_NONE;
+  }
+  function setBusy(busy) {
+    inFlight = busy;
+    if (scanButton) scanButton.disabled = busy;
+    if (downloadButton) downloadButton.disabled = busy;
+    if (downloadButton) downloadButton.textContent = busy ? "\u4E0B\u8F7D\u4E2D\u2026" : "\u4E0B\u8F7D\u9AD8\u6E05\u56FE";
+  }
+  function collectDomCandidates(doc) {
+    const out = [];
+    if (!doc) return out;
+    const imageNodes = Array.from(doc.querySelectorAll("img,source"));
+    for (const node of imageNodes) {
+      if (node.currentSrc) out.push(node.currentSrc);
+      for (const attribute of ["src", "data-src", "data-original", "data-lazy-src", "data-actualsrc", "data-originalsrc"]) {
+        const value = node.getAttribute && node.getAttribute(attribute);
+        if (value) out.push(value);
+      }
+      const srcset = node.getAttribute ? node.getAttribute("srcset") || node.getAttribute("data-srcset") || node.getAttribute("data-original-srcset") || "" : "";
+      if (srcset) {
+        const largest = pickLargestFromSrcset(srcset);
+        if (largest) out.push(largest);
+      }
+    }
+    const styledNodes = doc.querySelectorAll ? Array.from(doc.querySelectorAll('[style*="background"]')) : [];
+    for (const node of styledNodes) {
+      const style = node.getAttribute && node.getAttribute("style");
+      if (!style) continue;
+      const match = String(style).match(/url\(\s*['"]?([^'")]+)['"]?\s*\)/i);
+      if (match && match[1]) out.push(match[1]);
+    }
+    return out;
+  }
+  function computeImages(doc, options) {
+    const dom = collectDomCandidates(doc);
+    const html = doc && doc.documentElement ? String(doc.documentElement.innerHTML || "") : "";
+    const textUrls = extractUrlsFromText(html);
+    return collectGoodsImageCandidates(dom, textUrls, options);
+  }
+  function rescan(silent) {
+    const doc = ROOT.document;
+    if (!doc) return 0;
+    currentImages = computeImages(doc, { includeDecorations });
+    updateCountLabel();
+    if (!silent) setStatus(currentImages.length ? "\u626B\u63CF\u5B8C\u6210\uFF1A" + currentImages.length + " \u5F20" : COUNT_NONE);
+    return currentImages.length;
+  }
+  function extForImage(bytes, contentType, url) {
+    const sniffed = bytes ? sniffImageMimeFromBytes(bytes) : "";
+    if (sniffed) return extensionForMime(sniffed);
+    const fromType = String(contentType || "").split(";")[0].trim();
+    if (/image\//.test(fromType)) return extensionForMime(fromType);
+    const match = String(url || "").match(/\.(png|jpe?g|webp|gif|avif|heic)(?:[!?#]|$)/i);
+    if (match && match[1]) return match[1].toLowerCase().replace("jpeg", "jpg");
+    return formatMode === "jpeg" ? "jpg" : "png";
+  }
+  function mapWithConcurrencyLocal(items, limit, worker) {
+    const list = Array.isArray(items) ? items : [];
+    const lanes = [];
+    const results = new Array(list.length);
+    let cursor = 0;
+    const width = Math.max(1, Math.min(Number(limit) || 1, list.length || 1));
+    for (let lane = 0; lane < width; lane += 1) {
+      lanes.push((async () => {
+        while (cursor < list.length) {
+          const index = cursor;
+          cursor += 1;
+          try {
+            results[index] = await worker(list[index], index);
+          } catch (_) {
+            results[index] = null;
+          }
+        }
+      })());
+    }
+    return Promise.all(lanes).then(() => results);
+  }
+  function onDownload() {
+    if (inFlight) return;
+    const doc = ROOT.document;
+    const images = currentImages.length ? currentImages.slice() : computeImages(doc, { includeDecorations });
+    if (!images.length) {
+      setStatus(COUNT_NONE + "\uFF0C\u8BF7\u5148\u626B\u63CF");
+      return;
+    }
+    const goodsId = getGoodsIdFromHref(ROOT.location ? ROOT.location.pathname : "") || "goods";
+    const pageUrl = ROOT.location ? String(ROOT.location.href || "") : "";
+    const title = getGoodsTitleFromDocument(doc);
+    const scannedAt = (/* @__PURE__ */ new Date()).toLocaleString();
+    const total = images.length;
+    let done = 0;
+    let failed = 0;
+    setBusy(true);
+    setStatus("\u6B63\u5728\u4E0B\u8F7D 0/" + total + "\u2026");
+    mapWithConcurrencyLocal(images, 3, (url, index) => {
+      const hd = toHDGoodsUrl(url, formatMode);
+      return fetchBytes(hd, { timeout: 3e4 }).then((first) => {
+        let res = first;
+        if (!res || !res.ok) {
+          if (hd !== url) {
+            return fetchBytes(url, { timeout: 3e4 }).then((retry) => {
+              done += 1;
+              res = retry;
+              setStatus("\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + "\u2026");
+              return packEntry(url, retry, index);
+            });
+          }
+          done += 1;
+          setStatus("\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + "\u2026");
+          return packEntry(url, null, index);
+        }
+        done += 1;
+        setStatus("\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + "\u2026");
+        return packEntry(url, res, index);
+      });
+    }).then((packed) => {
+      const entries = [];
+      for (const item of packed) {
+        if (item && item.entry) entries.push(item.entry);
+        else failed += 1;
+      }
+      if (!entries.length) {
+        setBusy(false);
+        setStatus("\u5168\u90E8 " + total + " \u5F20\u56FE\u7247\u4E0B\u8F7D\u5931\u8D25");
+        return;
+      }
+      const info = buildGoodsInfoText({
+        pageUrl,
+        goodsId,
+        title,
+        scannedAt,
+        count: entries.length,
+        mode: formatMode
+      });
+      entries.unshift({ name: "00_\u5546\u54C1\u4FE1\u606F.txt", bytes: utf8Bytes(info) });
+      setStatus("\u6B63\u5728\u6253\u5305 " + entries.length + " \u4E2A\u6587\u4EF6\u2026");
+      const now = /* @__PURE__ */ new Date();
+      try {
+        const totalBytes = entries.reduce((sum, entry) => sum + (entry.bytes ? entry.bytes.length : 0), 0);
+        const parts = totalBytes > MAX_ZIP_BYTES ? splitZipEntries(entries, MAX_ZIP_BYTES) : [entries];
+        for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
+          const zipBytes = buildZip(parts[partIndex], { now });
+          const zipBlob = new Blob([zipBytes], { type: "application/zip" });
+          triggerCoverDownload(zipBlob, buildGoodsZipFileName(now, entries.length - 1, goodsId, partIndex, parts.length));
+        }
+        setBusy(false);
+        setStatus("\u5DF2\u4E0B\u8F7D " + (entries.length - 1) + " \u5F20\u56FE\u7247\uFF08" + (failed ? "\u5931\u8D25 " + failed + " \u5F20\uFF1B" : "") + "zip \u5DF2\u4FDD\u5B58\uFF09");
+      } catch (_) {
+        setBusy(false);
+        setStatus("\u6253\u5305\u4E0B\u8F7D\u5931\u8D25");
+      }
+    }, () => {
+      setBusy(false);
+      setStatus("\u4E0B\u8F7D\u5931\u8D25");
+    });
+  }
+  function packEntry(url, res, index) {
+    const bytes = res && res.ok && res.bytes && res.bytes.length ? res.bytes : null;
+    if (!bytes) return { entry: null };
+    const ext = extForImage(bytes, res.contentType, url);
+    return { entry: { name: buildGoodsImageFileName(index, ext), bytes } };
+  }
+  function onDecorationsToggle() {
+    includeDecorations = Boolean(decorToggle && decorToggle.checked);
+    rescan(true);
+    setStatus(includeDecorations ? "\u5DF2\u5305\u542B\u5934\u50CF/\u8868\u60C5\u7B49\u4FEE\u9970\u56FE" : "\u5DF2\u6392\u9664\u5934\u50CF/\u8868\u60C5\u7B49\u4FEE\u9970\u56FE");
+  }
+  function onFormatChange() {
+    formatMode = formatSelect ? formatSelect.value : "png";
+    if (formatMode !== "png" && formatMode !== "original" && formatMode !== "jpeg") formatMode = "png";
+    setStatus("\u5DF2\u5207\u6362\u683C\u5F0F\uFF1A" + (formatSelect ? formatSelect.options[formatSelect.selectedIndex].textContent : formatMode));
+  }
+  function onManualScan() {
+    setStatus("\u6B63\u5728\u626B\u63CF\u2026");
+    rescan(false);
+  }
+  function buildPanel() {
+    const doc = ROOT.document;
+    const element = doc.createElement("div");
+    element.id = PANEL_ID;
+    element.setAttribute("role", "complementary");
+    element.setAttribute("aria-label", "\u5C0F\u7EA2\u4E66\u5546\u54C1\u9AD8\u6E05\u56FE\u7247\u4E0B\u8F7D");
+    const header = doc.createElement("div");
+    header.className = "xhs-enhanced-goods-title";
+    header.textContent = TITLE_TEXT;
+    element.appendChild(header);
+    const buttonRow = doc.createElement("div");
+    buttonRow.className = "xhs-enhanced-goods-row";
+    scanButton = doc.createElement("button");
+    scanButton.type = "button";
+    scanButton.id = SCAN_BUTTON_ID;
+    scanButton.className = "xhs-enhanced-goods-secondary";
+    scanButton.textContent = "\u626B\u63CF\u56FE\u7247";
+    scanButton.addEventListener("click", onManualScan);
+    downloadButton = doc.createElement("button");
+    downloadButton.type = "button";
+    downloadButton.id = DOWNLOAD_BUTTON_ID;
+    downloadButton.className = "xhs-enhanced-goods-primary";
+    downloadButton.textContent = "\u4E0B\u8F7D\u9AD8\u6E05\u56FE";
+    downloadButton.addEventListener("click", onDownload);
+    buttonRow.appendChild(scanButton);
+    buttonRow.appendChild(downloadButton);
+    element.appendChild(buttonRow);
+    const formatLabel = doc.createElement("label");
+    formatLabel.className = "xhs-enhanced-goods-field";
+    formatLabel.setAttribute("for", FORMAT_ID);
+    formatLabel.appendChild(doc.createTextNode("\u9AD8\u6E05\u683C\u5F0F"));
+    formatSelect = doc.createElement("select");
+    formatSelect.id = FORMAT_ID;
+    for (const mode of GOODS_FORMAT_MODES) {
+      const option = doc.createElement("option");
+      option.value = mode.value;
+      option.textContent = mode.label;
+      if (mode.value === formatMode) option.selected = true;
+      formatSelect.appendChild(option);
+    }
+    formatSelect.addEventListener("change", onFormatChange);
+    formatLabel.appendChild(formatSelect);
+    element.appendChild(formatLabel);
+    const decorLabel = doc.createElement("label");
+    decorLabel.className = "xhs-enhanced-goods-check";
+    decorToggle = doc.createElement("input");
+    decorToggle.type = "checkbox";
+    decorToggle.id = DECOR_ID;
+    decorToggle.addEventListener("change", onDecorationsToggle);
+    decorLabel.appendChild(decorToggle);
+    decorLabel.appendChild(doc.createTextNode("\u5305\u542B\u5934\u50CF/\u8868\u60C5\u7B49\u4FEE\u9970\u56FE"));
+    element.appendChild(decorLabel);
+    countNode = doc.createElement("p");
+    countNode.id = COUNT_ID;
+    countNode.className = "xhs-enhanced-goods-count";
+    countNode.textContent = COUNT_EMPTY;
+    element.appendChild(countNode);
+    statusNode = doc.createElement("p");
+    statusNode.id = STATUS_ID;
+    statusNode.className = "xhs-enhanced-goods-status";
+    statusNode.setAttribute("role", "status");
+    statusNode.setAttribute("aria-live", "polite");
+    element.appendChild(statusNode);
+    return element;
+  }
+  function scheduleRescan() {
+    if (rescanTimer !== null) ROOT.clearTimeout(rescanTimer);
+    rescanTimer = ROOT.setTimeout(() => {
+      rescanTimer = null;
+      rescan(true);
+    }, 1200);
+  }
+  function bindObserver() {
+    if (!ROOT.document || typeof ROOT.MutationObserver !== "function") return;
+    const target = ROOT.document.documentElement;
+    if (!target) return;
+    if (observer) return;
+    observer = new ROOT.MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation && mutation.type === "attributes" && mutation.attributeName !== "src" && mutation.attributeName !== "srcset") continue;
+        scheduleRescan();
+        break;
+      }
+    });
+    observer.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srcset"] });
+  }
+  function ensureGoodsPanel() {
+    if (!ROOT.document || !ROOT.document.body) return false;
+    if (panel && panel.isConnected) return true;
+    removeGoodsPanel();
+    panel = buildPanel();
+    ROOT.document.body.appendChild(panel);
+    bindObserver();
+    autoScanTimer = ROOT.setTimeout(() => {
+      autoScanTimer = null;
+      rescan(true);
+    }, 800);
+    return true;
+  }
+  function removeGoodsPanel() {
+    if (observer) {
+      try {
+        observer.disconnect();
+      } catch (_) {
+      }
+      observer = null;
+    }
+    if (rescanTimer !== null) {
+      ROOT.clearTimeout(rescanTimer);
+      rescanTimer = null;
+    }
+    if (autoScanTimer !== null) {
+      ROOT.clearTimeout(autoScanTimer);
+      autoScanTimer = null;
+    }
+    const node = panel && panel.isConnected ? panel : ROOT.document && ROOT.document.getElementById ? ROOT.document.getElementById(PANEL_ID) : null;
+    if (node) node.remove();
+    panel = null;
+    countNode = null;
+    statusNode = null;
+    scanButton = null;
+    downloadButton = null;
+    formatSelect = null;
+    decorToggle = null;
+    currentImages = [];
+    inFlight = false;
+  }
+  function syncGoodsPanel(route) {
+    const pathname = String(route || "");
+    if (isGoodsDetailRoute(pathname)) return ensureGoodsPanel();
+    removeGoodsPanel();
+    return false;
+  }
+  function getGoodsImagesSnapshot() {
+    return currentImages.slice();
+  }
+
+  // src/content/index.js
+  var ROOT2 = getRoot();
   var TEST_MODE = isTestMode();
   var STYLE_ID = "xhs-enhanced-style";
   var CARD_CLASS = "xhs-enhanced-card--popular";
@@ -1732,7 +2289,7 @@
     "data-xhs-like-count"
   ]);
   var routeProvider = null;
-  var observer = null;
+  var observer2 = null;
   var structureObserver = null;
   var observerRoot = null;
   var scheduled = false;
@@ -1767,7 +2324,7 @@
   var eventBindings = [];
   function getResolver() {
     if (!fallbackTokenResolver) {
-      fallbackTokenResolver = createInitialStateResolver(() => ROOT.document || null);
+      fallbackTokenResolver = createInitialStateResolver(() => ROOT2.document || null);
     }
     return fallbackTokenResolver;
   }
@@ -1782,7 +2339,7 @@
     const { persisted } = writeStoredFocusPopular(enabled);
     if (focusToggle) focusToggle.setAttribute("aria-pressed", enabled ? "true" : "false");
     showCopyStatus((enabled ? "\u5DF2\u5F00\u542F\uFF1A\u53EA\u663E\u793A\u70ED\u95E8\u7B14\u8BB0" : "\u5DF2\u5173\u95ED\uFF1A\u663E\u793A\u5168\u90E8\u7B14\u8BB0") + (persisted ? "" : "\uFF08\u8BBE\u7F6E\u672A\u80FD\u4FDD\u5B58\uFF09"));
-    scan(ROOT.document);
+    scan(ROOT2.document);
   }
   function resolveCardNoteLink(card) {
     if (!card || !card.querySelectorAll) return "";
@@ -1840,7 +2397,7 @@
     if (!node) return "";
     try {
       const inline = node.style && node.style.backgroundImage ? node.style.backgroundImage : "";
-      const computed = !inline && ROOT.getComputedStyle ? ROOT.getComputedStyle(node).backgroundImage : inline;
+      const computed = !inline && ROOT2.getComputedStyle ? ROOT2.getComputedStyle(node).backgroundImage : inline;
       const text = inline || computed || "";
       const match = String(text).match(/url\((["']?)([^"')]+)\1\)/i);
       return match ? normalizeSpace(match[2]) : "";
@@ -1849,26 +2406,26 @@
     }
   }
   function clearCopyStatus() {
-    if (copyStatusTimer !== null) ROOT.clearTimeout(copyStatusTimer);
+    if (copyStatusTimer !== null) ROOT2.clearTimeout(copyStatusTimer);
     copyStatusTimer = null;
-    const node = copyStatus && copyStatus.isConnected ? copyStatus : ROOT.document && ROOT.document.getElementById(COPY_STATUS_ID);
+    const node = copyStatus && copyStatus.isConnected ? copyStatus : ROOT2.document && ROOT2.document.getElementById(COPY_STATUS_ID);
     if (node) node.remove();
     copyStatus = null;
   }
   function showCopyStatus(message) {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let node = copyStatus && copyStatus.isConnected ? copyStatus : ROOT.document.getElementById(COPY_STATUS_ID);
+    if (!ROOT2.document || !ROOT2.document.body) return;
+    let node = copyStatus && copyStatus.isConnected ? copyStatus : ROOT2.document.getElementById(COPY_STATUS_ID);
     if (!node) {
-      node = ROOT.document.createElement("div");
+      node = ROOT2.document.createElement("div");
       node.id = COPY_STATUS_ID;
       node.setAttribute("role", "status");
       node.setAttribute("aria-live", "polite");
-      ROOT.document.body.appendChild(node);
+      ROOT2.document.body.appendChild(node);
     }
     copyStatus = node;
     node.textContent = message;
-    if (copyStatusTimer !== null) ROOT.clearTimeout(copyStatusTimer);
-    copyStatusTimer = ROOT.setTimeout(() => {
+    if (copyStatusTimer !== null) ROOT2.clearTimeout(copyStatusTimer);
+    copyStatusTimer = ROOT2.setTimeout(() => {
       copyStatusTimer = null;
       clearCopyStatus();
     }, 2200);
@@ -1929,7 +2486,7 @@
   }
   function buildDetailNoteUrl() {
     try {
-      const loc = ROOT.location;
+      const loc = ROOT2.location;
       if (!loc || !loc.origin || loc.origin === "null") return "";
       return loc.origin + loc.pathname + (loc.search || "");
     } catch (_) {
@@ -1947,7 +2504,7 @@
       if (!result.ok || !button || !button.isConnected) return;
       button.textContent = SAVE_LIBRARY_DONE_TEXT;
       button.disabled = true;
-      ROOT.setTimeout(() => {
+      ROOT2.setTimeout(() => {
         button.textContent = SAVE_LIBRARY_TEXT;
         button.disabled = false;
       }, 2e3);
@@ -1963,7 +2520,7 @@
     submitNoteUrlsToLibrary([url]);
   }
   function openLibrarySettings() {
-    const chrome = ROOT.chrome;
+    const chrome = ROOT2.chrome;
     try {
       if (chrome && chrome.runtime && typeof chrome.runtime.openOptionsPage === "function") {
         chrome.runtime.openOptionsPage();
@@ -1975,7 +2532,7 @@
     return false;
   }
   function subscribePreferenceChanges() {
-    const chromeObj = ROOT.chrome;
+    const chromeObj = ROOT2.chrome;
     try {
       const store = chromeObj && chromeObj.storage;
       const onChanged = store && store.onChanged;
@@ -1983,14 +2540,14 @@
       preferenceChangeHandler = (changes, areaName) => {
         if (areaName !== "local" || !changes) return;
         if (!Object.prototype.hasOwnProperty.call(changes, THRESHOLD_KEY) && !Object.prototype.hasOwnProperty.call(changes, FOCUS_KEY)) return;
-        scan(ROOT.document);
+        scan(ROOT2.document);
       };
       onChanged.addListener(preferenceChangeHandler);
     } catch (_) {
     }
   }
   function unsubscribePreferenceChanges() {
-    const chromeObj = ROOT.chrome;
+    const chromeObj = ROOT2.chrome;
     try {
       const onChanged = chromeObj && chromeObj.storage && chromeObj.storage.onChanged;
       if (onChanged && typeof onChanged.removeListener === "function" && preferenceChangeHandler) {
@@ -2061,7 +2618,7 @@
     if (saveInFlight) return;
     const seen = /* @__PURE__ */ new Set();
     const urls = [];
-    for (const card of discoverCards(ROOT.document)) {
+    for (const card of discoverCards(ROOT2.document)) {
       const resolved = resolveSaveUrlFromCard(card);
       if (resolved.ok && !seen.has(resolved.url)) {
         seen.add(resolved.url);
@@ -2103,33 +2660,33 @@
     }
     let container = card.querySelector("." + CARD_ACTIONS_CLASS);
     if (!container) {
-      container = ROOT.document.createElement("div");
+      container = ROOT2.document.createElement("div");
       container.className = CARD_ACTIONS_CLASS;
-      const linkButton = ROOT.document.createElement("button");
+      const linkButton = ROOT2.document.createElement("button");
       linkButton.type = "button";
       linkButton.className = COPY_LINK_CLASS;
       linkButton.textContent = COPY_LINK_TEXT;
       linkButton.setAttribute("aria-label", COPY_LINK_TEXT);
       linkButton.addEventListener("click", () => onCopyLink(card));
-      const coverButton = ROOT.document.createElement("button");
+      const coverButton = ROOT2.document.createElement("button");
       coverButton.type = "button";
       coverButton.className = COPY_COVER_CLASS;
       coverButton.textContent = COPY_COVER_TEXT;
       coverButton.setAttribute("aria-label", COPY_COVER_TEXT);
       coverButton.addEventListener("click", () => onCopyCover(card));
-      const downloadButton = ROOT.document.createElement("button");
-      downloadButton.type = "button";
-      downloadButton.className = DOWNLOAD_COVER_CLASS;
-      downloadButton.textContent = DOWNLOAD_COVER_TEXT;
-      downloadButton.setAttribute("aria-label", DOWNLOAD_COVER_TEXT);
-      downloadButton.addEventListener("click", () => onDownloadCover(card));
-      const saveButton = ROOT.document.createElement("button");
+      const downloadButton2 = ROOT2.document.createElement("button");
+      downloadButton2.type = "button";
+      downloadButton2.className = DOWNLOAD_COVER_CLASS;
+      downloadButton2.textContent = DOWNLOAD_COVER_TEXT;
+      downloadButton2.setAttribute("aria-label", DOWNLOAD_COVER_TEXT);
+      downloadButton2.addEventListener("click", () => onDownloadCover(card));
+      const saveButton = ROOT2.document.createElement("button");
       saveButton.type = "button";
       saveButton.className = SAVE_LIBRARY_CLASS;
       saveButton.textContent = SAVE_LIBRARY_TEXT;
       saveButton.setAttribute("aria-label", SAVE_LIBRARY_TEXT);
       saveButton.addEventListener("click", () => onSaveToLibrary(card, saveButton));
-      container.append(linkButton, coverButton, downloadButton, saveButton);
+      container.append(linkButton, coverButton, downloadButton2, saveButton);
       card.appendChild(container);
     }
   }
@@ -2150,13 +2707,13 @@
       return null;
     }
     try {
-      const position = ROOT.getComputedStyle ? ROOT.getComputedStyle(card).position : "";
+      const position = ROOT2.getComputedStyle ? ROOT2.getComputedStyle(card).position : "";
       if (position === "static" || !position) card.style.position = "relative";
     } catch (_) {
     }
     let box = card.querySelector("." + CHECKBOX_CLASS);
     if (!box) {
-      box = ROOT.document.createElement("button");
+      box = ROOT2.document.createElement("button");
       box.type = "button";
       box.className = CHECKBOX_CLASS;
       box.textContent = CHECKBOX_CHECKED_TEXT;
@@ -2182,7 +2739,7 @@
     box.classList.toggle("xhs-enhanced-checkbox--checked", checked);
   }
   function syncAllCheckboxes(root) {
-    const scope = root || ROOT.document;
+    const scope = root || ROOT2.document;
     if (!scope || !scope.querySelectorAll) return;
     for (const card of discoverCards(scope)) syncCardCheckbox(card);
   }
@@ -2203,14 +2760,14 @@
   var batchDownloadCache = null;
   function updateBatchBarCount() {
     if (!batchBar || !batchBar.isConnected) return;
-    const countNode = batchBar.querySelector("#" + BATCH_COUNT_ID);
+    const countNode2 = batchBar.querySelector("#" + BATCH_COUNT_ID);
     const text = "\u5DF2\u9009 " + selection.size + " \u7BC7";
-    if (countNode && batchCountCache !== text) {
+    if (countNode2 && batchCountCache !== text) {
       batchCountCache = text;
-      countNode.textContent = text;
+      countNode2.textContent = text;
     }
     if (batchSelectLoadedButton) {
-      const cards = isTargetRoute(getCurrentRoute()) ? discoverCards(ROOT.document) : [];
+      const cards = isTargetRoute(getCurrentRoute()) ? discoverCards(ROOT2.document) : [];
       let loaded = 0;
       let selectedLoaded = 0;
       for (const card of cards) {
@@ -2245,7 +2802,7 @@
     updateBatchBarCount();
   }
   function onSelectLoadedClick() {
-    const cards = discoverCards(ROOT.document);
+    const cards = discoverCards(ROOT2.document);
     const loaded = [];
     for (const card of cards) {
       const id = cardNoteTargetId(card);
@@ -2264,7 +2821,7 @@
         if (snapshot) selection.add(snapshot);
       }
     }
-    syncAllCheckboxes(ROOT.document);
+    syncAllCheckboxes(ROOT2.document);
     updateBatchBarCount();
     showCopyStatus(allSelected ? BATCH_SELECT_ALL_OFF_TEXT : BATCH_SELECT_ALL_ON_TEXT(loaded.length));
   }
@@ -2272,11 +2829,11 @@
     continuousSelect = !continuousSelect;
     if (batchContinuousButton) batchContinuousButton.setAttribute("aria-pressed", continuousSelect ? "true" : "false");
     showCopyStatus(continuousSelect ? BATCH_CONTINUOUS_ON_TEXT : BATCH_CONTINUOUS_OFF_TEXT);
-    if (continuousSelect) scan(ROOT.document);
+    if (continuousSelect) scan(ROOT2.document);
   }
   function onBatchClearClick() {
     selection.clear();
-    syncAllCheckboxes(ROOT.document);
+    syncAllCheckboxes(ROOT2.document);
     updateBatchBarCount();
     showCopyStatus(BATCH_CLEARED_TEXT);
   }
@@ -2284,7 +2841,7 @@
   function updateBatchScopeButtons() {
     if (!batchBar) return;
     for (const [scope, id] of [["cover", BATCH_SCOPE_COVER_ID], ["inner", BATCH_SCOPE_INNER_ID], ["all", BATCH_SCOPE_ALL_ID]]) {
-      const button = ROOT.document.getElementById(id);
+      const button = ROOT2.document.getElementById(id);
       if (!button) continue;
       const pressed = batchScopeCache2 === scope;
       if (button.getAttribute("aria-pressed") !== (pressed ? "true" : "false")) {
@@ -2300,19 +2857,19 @@
   }
   var batchProgressNode = null;
   function showBatchProgress(message) {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let node = batchProgressNode && batchProgressNode.isConnected ? batchProgressNode : ROOT.document.getElementById(BATCH_PROGRESS_ID);
+    if (!ROOT2.document || !ROOT2.document.body) return;
+    let node = batchProgressNode && batchProgressNode.isConnected ? batchProgressNode : ROOT2.document.getElementById(BATCH_PROGRESS_ID);
     if (!node) {
-      node = ROOT.document.createElement("div");
+      node = ROOT2.document.createElement("div");
       node.id = BATCH_PROGRESS_ID;
       node.setAttribute("role", "status");
-      ROOT.document.body.appendChild(node);
+      ROOT2.document.body.appendChild(node);
     }
     if (node.textContent !== message) node.textContent = message;
     batchProgressNode = node;
   }
   function clearBatchProgress() {
-    const node = batchProgressNode && batchProgressNode.isConnected ? batchProgressNode : ROOT.document && ROOT.document.getElementById(BATCH_PROGRESS_ID);
+    const node = batchProgressNode && batchProgressNode.isConnected ? batchProgressNode : ROOT2.document && ROOT2.document.getElementById(BATCH_PROGRESS_ID);
     if (node) node.remove();
     batchProgressNode = null;
   }
@@ -2406,7 +2963,7 @@
     });
   }
   function removeBatchBar() {
-    const bar = batchBar && batchBar.isConnected ? batchBar : ROOT.document && ROOT.document.getElementById(BATCH_BAR_ID);
+    const bar = batchBar && batchBar.isConnected ? batchBar : ROOT2.document && ROOT2.document.getElementById(BATCH_BAR_ID);
     if (bar) bar.remove();
     batchBar = null;
     batchDownloadButton = null;
@@ -2417,40 +2974,40 @@
     batchDownloadCache = null;
   }
   function ensureBatchBar() {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let bar = batchBar && batchBar.isConnected ? batchBar : ROOT.document.getElementById(BATCH_BAR_ID);
+    if (!ROOT2.document || !ROOT2.document.body) return;
+    let bar = batchBar && batchBar.isConnected ? batchBar : ROOT2.document.getElementById(BATCH_BAR_ID);
     if (!bar) {
-      bar = ROOT.document.createElement("div");
+      bar = ROOT2.document.createElement("div");
       bar.id = BATCH_BAR_ID;
       bar.setAttribute("role", "toolbar");
       bar.setAttribute("aria-label", "\u6279\u91CF\u4E0B\u8F7D\u5DF2\u9009\u7B14\u8BB0\u7684\u5C01\u9762");
-      const countNode = ROOT.document.createElement("span");
-      countNode.id = BATCH_COUNT_ID;
-      countNode.textContent = "\u5DF2\u9009 " + selection.size + " \u7BC7";
-      const selectLoaded = ROOT.document.createElement("button");
+      const countNode2 = ROOT2.document.createElement("span");
+      countNode2.id = BATCH_COUNT_ID;
+      countNode2.textContent = "\u5DF2\u9009 " + selection.size + " \u7BC7";
+      const selectLoaded = ROOT2.document.createElement("button");
       selectLoaded.id = BATCH_SELECT_LOADED_ID;
       selectLoaded.type = "button";
       selectLoaded.textContent = "\u5168\u9009\u5DF2\u52A0\u8F7D";
       selectLoaded.setAttribute("aria-pressed", "false");
       selectLoaded.addEventListener("click", onSelectLoadedClick);
-      const continuous = ROOT.document.createElement("button");
+      const continuous = ROOT2.document.createElement("button");
       continuous.id = BATCH_CONTINUOUS_ID;
       continuous.type = "button";
       continuous.textContent = "\u8FDE\u7EED\u52FE\u9009";
       continuous.setAttribute("aria-pressed", "false");
       continuous.setAttribute("title", "\u5F00\u542F\u540E\u6EDA\u52A8\u52A0\u8F7D\u7684\u65B0\u7B14\u8BB0\u4F1A\u81EA\u52A8\u52FE\u9009");
       continuous.addEventListener("click", onContinuousToggleClick);
-      const clear = ROOT.document.createElement("button");
+      const clear = ROOT2.document.createElement("button");
       clear.id = BATCH_CLEAR_ID;
       clear.type = "button";
       clear.textContent = "\u6E05\u7A7A";
       clear.addEventListener("click", onBatchClearClick);
-      const scopeGroup = ROOT.document.createElement("div");
+      const scopeGroup = ROOT2.document.createElement("div");
       scopeGroup.id = BATCH_SCOPE_ID;
       scopeGroup.setAttribute("role", "group");
       scopeGroup.setAttribute("aria-label", "\u4E0B\u8F7D\u8303\u56F4");
       for (const [scope, id, label] of [["cover", BATCH_SCOPE_COVER_ID, "\u5C01\u9762"], ["inner", BATCH_SCOPE_INNER_ID, "\u5185\u56FE"], ["all", BATCH_SCOPE_ALL_ID, "\u5168\u90E8"]]) {
-        const scopeButton = ROOT.document.createElement("button");
+        const scopeButton = ROOT2.document.createElement("button");
         scopeButton.id = id;
         scopeButton.type = "button";
         scopeButton.textContent = label;
@@ -2459,13 +3016,13 @@
         scopeButton.addEventListener("click", () => onBatchScopeClick(scope));
         scopeGroup.appendChild(scopeButton);
       }
-      const download = ROOT.document.createElement("button");
+      const download = ROOT2.document.createElement("button");
       download.id = BATCH_DOWNLOAD_ID;
       download.type = "button";
       download.textContent = "\u4E0B\u8F7D\u5DF2\u9009";
       download.addEventListener("click", onBatchDownload);
-      bar.append(countNode, selectLoaded, continuous, clear, scopeGroup, download);
-      ROOT.document.body.appendChild(bar);
+      bar.append(countNode2, selectLoaded, continuous, clear, scopeGroup, download);
+      ROOT2.document.body.appendChild(bar);
       batchDownloadButton = download;
       batchSelectLoadedButton = selectLoaded;
       batchContinuousButton = continuous;
@@ -2480,7 +3037,7 @@
     updateBatchDownloadButton();
   }
   function syncBatchBar() {
-    if (!ROOT.document || !ROOT.document.body) return;
+    if (!ROOT2.document || !ROOT2.document.body) return;
     if (isTargetRoute(getCurrentRoute())) {
       ensureBatchBar();
     } else {
@@ -2489,7 +3046,7 @@
   }
   function getCurrentRoute() {
     if (TEST_MODE && routeProvider) return String(routeProvider() || "");
-    return ROOT.location ? ROOT.location.pathname : "";
+    return ROOT2.location ? ROOT2.location.pathname : "";
   }
   function getAttributeSource(node, names) {
     for (const name of names) {
@@ -2570,7 +3127,7 @@
   }
   function isCaptureMode() {
     try {
-      const search = ROOT.location && ROOT.location.search;
+      const search = ROOT2.location && ROOT2.location.search;
       return typeof search === "string" && search.indexOf("xhs_enh_capture=1") >= 0;
     } catch (_) {
       return false;
@@ -2588,8 +3145,8 @@
     });
   }
   function collectSlimNoteFromDocument() {
-    if (!ROOT.document) return null;
-    for (const script of Array.from(ROOT.document.querySelectorAll("script"))) {
+    if (!ROOT2.document) return null;
+    for (const script of Array.from(ROOT2.document.querySelectorAll("script"))) {
       const text = script.textContent || "";
       if (text.indexOf("__INITIAL_STATE__=") < 0) continue;
       const state = parseInitialStateFromScriptText(text);
@@ -2720,15 +3277,15 @@
     return Array.from(cards);
   }
   function applyCardActionsFallback() {
-    if (!ROOT.document || !isTargetRoute(getCurrentRoute())) return;
-    for (const card of discoverLinkCards(ROOT.document)) {
+    if (!ROOT2.document || !isTargetRoute(getCurrentRoute())) return;
+    for (const card of discoverLinkCards(ROOT2.document)) {
       ensureCardActions(card);
       renderCardChrome(card);
     }
   }
   function ensureStyle() {
-    if (!ROOT.document || ROOT.document.getElementById(STYLE_ID)) return;
-    const style = ROOT.document.createElement("style");
+    if (!ROOT2.document || ROOT2.document.getElementById(STYLE_ID)) return;
+    const style = ROOT2.document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
       .${CARD_CLASS}{outline:2px solid #ff2442!important;background:rgba(255,36,66,.07)!important;box-shadow:0 2px 10px rgba(255,36,66,.14)!important}
@@ -2777,8 +3334,23 @@
       #${BATCH_SCOPE_ID} button[aria-pressed="true"]{background:#ff2442;color:#fff}
       #${BATCH_SCOPE_ID} button:focus-visible,#${BATCH_PROGRESS_ID}:focus-visible{outline:2px solid #fff;outline-offset:2px}
       #${BATCH_PROGRESS_ID}{position:fixed;top:226px;right:24px;z-index:2147483646;max-width:300px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.93);color:#fff;font:13px/1.5 system-ui,sans-serif;pointer-events:none}
+      #xhs-enhanced-goods-panel{position:fixed;right:20px;top:150px;z-index:2147483646;width:252px;padding:14px 14px 12px;border-radius:12px;background:rgba(30,30,30,.93);color:#fff;font:13px/1.5 system-ui,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.35);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+      .xhs-enhanced-goods-title{font-weight:700;font-size:14px;margin-bottom:8px}
+      .xhs-enhanced-goods-row{display:flex;gap:8px;margin-bottom:10px}
+      #xhs-enhanced-goods-scan,#xhs-enhanced-goods-download{flex:1;border:0;border-radius:8px;padding:8px 10px;font:600 13px/1.4 system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+      .xhs-enhanced-goods-secondary{background:rgba(255,255,255,.14);color:#fff}
+      .xhs-enhanced-goods-secondary:hover{background:rgba(255,255,255,.24)}
+      .xhs-enhanced-goods-primary{background:#ff2442;color:#fff}
+      .xhs-enhanced-goods-primary:hover{background:#e61e3c}
+      #xhs-enhanced-goods-scan:disabled,#xhs-enhanced-goods-download:disabled{opacity:.55;cursor:default}
+      .xhs-enhanced-goods-field{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;color:rgba(255,255,255,.85)}
+      .xhs-enhanced-goods-field select{background:rgba(255,255,255,.12);color:#fff;border:0;border-radius:6px;padding:5px 8px;font:13px/1.4 system-ui,sans-serif}
+      .xhs-enhanced-goods-field select:focus-visible,#xhs-enhanced-goods-scan:focus-visible,#xhs-enhanced-goods-download:focus-visible,.xhs-enhanced-goods-check input:focus-visible{outline:2px solid #fff;outline-offset:2px}
+      .xhs-enhanced-goods-check{display:flex;align-items:center;gap:6px;color:rgba(255,255,255,.85);margin-bottom:8px;cursor:pointer}
+      .xhs-enhanced-goods-count{color:#fff;font-weight:700;margin:2px 0 4px}
+      .xhs-enhanced-goods-status{min-height:1.4em;color:rgba(255,255,255,.78);margin:0;word-break:break-all}
     `;
-    (ROOT.document.head || ROOT.document.documentElement).appendChild(style);
+    (ROOT2.document.head || ROOT2.document.documentElement).appendChild(style);
   }
   function renderCard(card) {
     if (!card || !card.isConnected) return;
@@ -2805,10 +3377,10 @@
     for (const node of card.querySelectorAll(`.${LIKE_CLASS}`)) node.classList.remove(LIKE_CLASS);
   }
   function cleanupAll() {
-    if (!ROOT.document) return;
-    for (const card of ROOT.document.querySelectorAll(`.${CARD_CLASS},[${SIGNATURE_ATTRIBUTE}]`)) cleanupCard(card);
-    for (const container of ROOT.document.querySelectorAll("." + CARD_ACTIONS_CLASS)) container.remove();
-    for (const checkbox of ROOT.document.querySelectorAll("." + CHECKBOX_CLASS)) checkbox.remove();
+    if (!ROOT2.document) return;
+    for (const card of ROOT2.document.querySelectorAll(`.${CARD_CLASS},[${SIGNATURE_ATTRIBUTE}]`)) cleanupCard(card);
+    for (const container of ROOT2.document.querySelectorAll("." + CARD_ACTIONS_CLASS)) container.remove();
+    for (const checkbox of ROOT2.document.querySelectorAll("." + CHECKBOX_CLASS)) checkbox.remove();
   }
   function selectNextPopularCard(cards, viewportHeight) {
     let selected = null;
@@ -2837,69 +3409,69 @@
     return selected;
   }
   function clearJumpStatus() {
-    if (jumpStatusTimer !== null) ROOT.clearTimeout(jumpStatusTimer);
+    if (jumpStatusTimer !== null) ROOT2.clearTimeout(jumpStatusTimer);
     jumpStatusTimer = null;
-    const node = jumpStatus && jumpStatus.isConnected ? jumpStatus : ROOT.document && ROOT.document.getElementById(JUMP_STATUS_ID);
+    const node = jumpStatus && jumpStatus.isConnected ? jumpStatus : ROOT2.document && ROOT2.document.getElementById(JUMP_STATUS_ID);
     if (node) node.remove();
     jumpStatus = null;
   }
   function showJumpStatus(message = LAST_NOTE_TEXT) {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let node = jumpStatus && jumpStatus.isConnected ? jumpStatus : ROOT.document.getElementById(JUMP_STATUS_ID);
+    if (!ROOT2.document || !ROOT2.document.body) return;
+    let node = jumpStatus && jumpStatus.isConnected ? jumpStatus : ROOT2.document.getElementById(JUMP_STATUS_ID);
     if (!node) {
-      node = ROOT.document.createElement("div");
+      node = ROOT2.document.createElement("div");
       node.id = JUMP_STATUS_ID;
       node.setAttribute("role", "status");
       node.setAttribute("aria-live", "polite");
       node.textContent = message;
-      ROOT.document.body.appendChild(node);
+      ROOT2.document.body.appendChild(node);
     }
     jumpStatus = node;
     node.textContent = message;
-    if (jumpStatusTimer !== null) ROOT.clearTimeout(jumpStatusTimer);
-    jumpStatusTimer = ROOT.setTimeout(() => {
+    if (jumpStatusTimer !== null) ROOT2.clearTimeout(jumpStatusTimer);
+    jumpStatusTimer = ROOT2.setTimeout(() => {
       jumpStatusTimer = null;
       clearJumpStatus();
     }, 3e3);
   }
   function jumpToNextPopularCard() {
-    if (!ROOT.document) return;
-    const viewportHeight = ROOT.innerHeight || ROOT.document.documentElement.clientHeight || 0;
-    const target = selectNextPopularCard(ROOT.document.querySelectorAll(`.${CARD_CLASS}`), viewportHeight);
+    if (!ROOT2.document) return;
+    const viewportHeight = ROOT2.innerHeight || ROOT2.document.documentElement.clientHeight || 0;
+    const target = selectNextPopularCard(ROOT2.document.querySelectorAll(`.${CARD_CLASS}`), viewportHeight);
     if (target) {
       clearJumpStatus();
       target.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
-    const documentElement = ROOT.document.documentElement;
-    const body = ROOT.document.body;
+    const documentElement = ROOT2.document.documentElement;
+    const body = ROOT2.document.body;
     const bottom = Math.max(documentElement ? documentElement.scrollHeight : 0, body ? body.scrollHeight : 0);
-    if (typeof ROOT.scrollTo === "function") ROOT.scrollTo({ top: bottom, behavior: "smooth" });
+    if (typeof ROOT2.scrollTo === "function") ROOT2.scrollTo({ top: bottom, behavior: "smooth" });
     showJumpStatus();
   }
   function jumpToPreviousPopularCard() {
-    if (!ROOT.document) return;
-    const target = selectPreviousPopularCard(ROOT.document.querySelectorAll(`.${CARD_CLASS}`));
+    if (!ROOT2.document) return;
+    const target = selectPreviousPopularCard(ROOT2.document.querySelectorAll(`.${CARD_CLASS}`));
     if (target) {
       clearJumpStatus();
       target.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
-    if (typeof ROOT.scrollTo === "function") ROOT.scrollTo({ top: 0, behavior: "smooth" });
+    if (typeof ROOT2.scrollTo === "function") ROOT2.scrollTo({ top: 0, behavior: "smooth" });
     showJumpStatus(FIRST_NOTE_TEXT);
   }
   function ensureJumpUi() {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let nav = jumpNav && jumpNav.isConnected ? jumpNav : ROOT.document.getElementById(JUMP_NAV_ID);
+    if (!ROOT2.document || !ROOT2.document.body) return;
+    let nav = jumpNav && jumpNav.isConnected ? jumpNav : ROOT2.document.getElementById(JUMP_NAV_ID);
     if (!nav) {
-      nav = ROOT.document.createElement("div");
+      nav = ROOT2.document.createElement("div");
       nav.id = JUMP_NAV_ID;
-      ROOT.document.body.appendChild(nav);
+      ROOT2.document.body.appendChild(nav);
     }
     jumpNav = nav;
-    let prev = jumpPrevButton && jumpPrevButton.isConnected ? jumpPrevButton : ROOT.document.getElementById(JUMP_PREV_BUTTON_ID);
+    let prev = jumpPrevButton && jumpPrevButton.isConnected ? jumpPrevButton : ROOT2.document.getElementById(JUMP_PREV_BUTTON_ID);
     if (!prev) {
-      prev = ROOT.document.createElement("button");
+      prev = ROOT2.document.createElement("button");
       prev.id = JUMP_PREV_BUTTON_ID;
       prev.type = "button";
       prev.textContent = JUMP_PREV_BUTTON_TEXT;
@@ -2907,9 +3479,9 @@
       prev.addEventListener("click", jumpToPreviousPopularCard);
     }
     jumpPrevButton = prev;
-    let button = jumpButton && jumpButton.isConnected ? jumpButton : ROOT.document.getElementById(JUMP_BUTTON_ID);
+    let button = jumpButton && jumpButton.isConnected ? jumpButton : ROOT2.document.getElementById(JUMP_BUTTON_ID);
     if (!button) {
-      button = ROOT.document.createElement("button");
+      button = ROOT2.document.createElement("button");
       button.id = JUMP_BUTTON_ID;
       button.type = "button";
       button.textContent = JUMP_BUTTON_TEXT;
@@ -2917,9 +3489,9 @@
       button.addEventListener("click", jumpToNextPopularCard);
     }
     jumpButton = button;
-    let toggle = focusToggle && focusToggle.isConnected ? focusToggle : ROOT.document.getElementById(FOCUS_TOGGLE_ID);
+    let toggle = focusToggle && focusToggle.isConnected ? focusToggle : ROOT2.document.getElementById(FOCUS_TOGGLE_ID);
     if (!toggle) {
-      toggle = ROOT.document.createElement("button");
+      toggle = ROOT2.document.createElement("button");
       toggle.id = FOCUS_TOGGLE_ID;
       toggle.type = "button";
       toggle.textContent = FOCUS_TOGGLE_TEXT;
@@ -2934,10 +3506,10 @@
   }
   function removeJumpUi() {
     clearJumpStatus();
-    const nav = jumpNav && jumpNav.isConnected ? jumpNav : ROOT.document && ROOT.document.getElementById(JUMP_NAV_ID);
+    const nav = jumpNav && jumpNav.isConnected ? jumpNav : ROOT2.document && ROOT2.document.getElementById(JUMP_NAV_ID);
     if (nav) nav.remove();
     for (const id of [JUMP_PREV_BUTTON_ID, JUMP_BUTTON_ID, FOCUS_TOGGLE_ID]) {
-      const stray = ROOT.document && ROOT.document.getElementById(id);
+      const stray = ROOT2.document && ROOT2.document.getElementById(id);
       if (stray) stray.remove();
     }
     jumpNav = null;
@@ -2948,60 +3520,60 @@
   var settingsButton = null;
   var preferenceChangeHandler = null;
   function ensureSettingsButton() {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let button = settingsButton && settingsButton.isConnected ? settingsButton : ROOT.document.getElementById(SETTINGS_BUTTON_ID);
+    if (!ROOT2.document || !ROOT2.document.body) return;
+    let button = settingsButton && settingsButton.isConnected ? settingsButton : ROOT2.document.getElementById(SETTINGS_BUTTON_ID);
     if (!button) {
-      button = ROOT.document.createElement("button");
+      button = ROOT2.document.createElement("button");
       button.id = SETTINGS_BUTTON_ID;
       button.type = "button";
       button.textContent = SETTINGS_BUTTON_TEXT;
       button.setAttribute("aria-label", "\u6253\u5F00\u6269\u5C55\u9009\u9879\u9875\uFF08\u70ED\u95E8\u9608\u503C\u3001\u5185\u5BB9\u5E93\u8BBE\u7F6E\uFF09");
       button.setAttribute("title", "\u6269\u5C55\u9009\u9879\uFF1A\u70ED\u95E8\u9608\u503C / \u5185\u5BB9\u5E93\u8BBE\u7F6E");
       button.addEventListener("click", openLibrarySettings);
-      ROOT.document.body.appendChild(button);
+      ROOT2.document.body.appendChild(button);
     }
     settingsButton = button;
   }
   function removeSettingsButton() {
-    const button = settingsButton && settingsButton.isConnected ? settingsButton : ROOT.document && ROOT.document.getElementById(SETTINGS_BUTTON_ID);
+    const button = settingsButton && settingsButton.isConnected ? settingsButton : ROOT2.document && ROOT2.document.getElementById(SETTINGS_BUTTON_ID);
     if (button) button.remove();
     settingsButton = null;
   }
   function ensureLibraryPageButton() {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let button = libraryPageButton && libraryPageButton.isConnected ? libraryPageButton : ROOT.document.getElementById(LIBRARY_PAGE_BUTTON_ID);
+    if (!ROOT2.document || !ROOT2.document.body) return;
+    let button = libraryPageButton && libraryPageButton.isConnected ? libraryPageButton : ROOT2.document.getElementById(LIBRARY_PAGE_BUTTON_ID);
     if (!button) {
-      button = ROOT.document.createElement("button");
+      button = ROOT2.document.createElement("button");
       button.id = LIBRARY_PAGE_BUTTON_ID;
       button.type = "button";
       button.textContent = LIBRARY_PAGE_BUTTON_TEXT;
       button.setAttribute("aria-label", LIBRARY_PAGE_BUTTON_TEXT);
       button.addEventListener("click", onSaveCurrentDetail);
-      ROOT.document.body.appendChild(button);
+      ROOT2.document.body.appendChild(button);
     }
     libraryPageButton = button;
   }
   function removeLibraryPageButton() {
-    const button = libraryPageButton && libraryPageButton.isConnected ? libraryPageButton : ROOT.document && ROOT.document.getElementById(LIBRARY_PAGE_BUTTON_ID);
+    const button = libraryPageButton && libraryPageButton.isConnected ? libraryPageButton : ROOT2.document && ROOT2.document.getElementById(LIBRARY_PAGE_BUTTON_ID);
     if (button) button.remove();
     libraryPageButton = null;
   }
   function ensureLibraryBatchButton() {
-    if (!ROOT.document || !ROOT.document.body) return;
-    let button = libraryBatchButton && libraryBatchButton.isConnected ? libraryBatchButton : ROOT.document.getElementById(LIBRARY_BATCH_BUTTON_ID);
+    if (!ROOT2.document || !ROOT2.document.body) return;
+    let button = libraryBatchButton && libraryBatchButton.isConnected ? libraryBatchButton : ROOT2.document.getElementById(LIBRARY_BATCH_BUTTON_ID);
     if (!button) {
-      button = ROOT.document.createElement("button");
+      button = ROOT2.document.createElement("button");
       button.id = LIBRARY_BATCH_BUTTON_ID;
       button.type = "button";
       button.textContent = LIBRARY_BATCH_BUTTON_TEXT;
       button.setAttribute("aria-label", LIBRARY_BATCH_BUTTON_TEXT);
       button.addEventListener("click", onSaveAllVisible);
-      ROOT.document.body.appendChild(button);
+      ROOT2.document.body.appendChild(button);
     }
     libraryBatchButton = button;
   }
   function removeLibraryBatchButton() {
-    const button = libraryBatchButton && libraryBatchButton.isConnected ? libraryBatchButton : ROOT.document && ROOT.document.getElementById(LIBRARY_BATCH_BUTTON_ID);
+    const button = libraryBatchButton && libraryBatchButton.isConnected ? libraryBatchButton : ROOT2.document && ROOT2.document.getElementById(LIBRARY_BATCH_BUTTON_ID);
     if (button) button.remove();
     libraryBatchButton = null;
   }
@@ -3011,7 +3583,7 @@
     removeLibraryBatchButton();
   }
   function syncLibraryUi() {
-    if (!ROOT.document || !ROOT.document.body) return;
+    if (!ROOT2.document || !ROOT2.document.body) return;
     const route = getCurrentRoute();
     if (isDetailRoute(route)) {
       ensureSettingsButton();
@@ -3036,18 +3608,19 @@
   }
   function flush() {
     scheduled = false;
-    if (destroyed || !ROOT.document) return;
+    if (destroyed || !ROOT2.document) return;
     counters.batches += 1;
     syncJumpUi();
     syncLibraryUi();
     syncBatchBar();
-    const url = ROOT.location ? ROOT.location.href : getCurrentRoute();
+    syncGoodsPanel(getCurrentRoute());
+    const url = ROOT2.location ? ROOT2.location.href : getCurrentRoute();
     if (url !== lastUrl) {
       lastUrl = url;
       counters.routeSignals += 1;
       clearFallbackTokenCache();
       if (!isTargetRoute(getCurrentRoute())) cleanupAll();
-      else for (const card of discoverCards(ROOT.document)) pending.add(card);
+      else for (const card of discoverCards(ROOT2.document)) pending.add(card);
     }
     if (!isTargetRoute(getCurrentRoute())) {
       pending.clear();
@@ -3077,19 +3650,19 @@
       if (!token || !token.active || lifecycleToken !== token) return;
       flush();
     };
-    if (typeof ROOT.requestAnimationFrame === "function") {
-      ROOT.requestAnimationFrame(run);
-      if (ROOT.document && ROOT.document.visibilityState === "hidden" && typeof ROOT.setTimeout === "function") {
-        ROOT.setTimeout(run, 150);
+    if (typeof ROOT2.requestAnimationFrame === "function") {
+      ROOT2.requestAnimationFrame(run);
+      if (ROOT2.document && ROOT2.document.visibilityState === "hidden" && typeof ROOT2.setTimeout === "function") {
+        ROOT2.setTimeout(run, 150);
       }
     } else {
       Promise.resolve().then(run);
     }
   }
   function scan(root) {
-    if (!ROOT.document || !isTargetRoute(getCurrentRoute())) return;
+    if (!ROOT2.document || !isTargetRoute(getCurrentRoute())) return;
     counters.fullScans += 1;
-    for (const card of discoverCards(root || ROOT.document)) pending.add(card);
+    for (const card of discoverCards(root || ROOT2.document)) pending.add(card);
     schedule();
   }
   function mutationCallback(mutations) {
@@ -3112,16 +3685,16 @@
     eventBindings.push([target, type, handler]);
   }
   function selectObserverRoot() {
-    return ROOT.document.querySelector(SELECTORS.contentRoots) || ROOT.document.body;
+    return ROOT2.document.querySelector(SELECTORS.contentRoots) || ROOT2.document.body;
   }
   function bindObserverRoot(nextRoot) {
-    if (nextRoot === observerRoot && observer) return false;
-    if (observer) observer.disconnect();
-    observer = null;
+    if (nextRoot === observerRoot && observer2) return false;
+    if (observer2) observer2.disconnect();
+    observer2 = null;
     observerRoot = nextRoot || null;
-    if (!observerRoot || typeof ROOT.MutationObserver !== "function") return false;
-    observer = new ROOT.MutationObserver(mutationCallback);
-    observer.observe(observerRoot, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: READ_ATTRIBUTES.slice() });
+    if (!observerRoot || typeof ROOT2.MutationObserver !== "function") return false;
+    observer2 = new ROOT2.MutationObserver(mutationCallback);
+    observer2.observe(observerRoot, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: READ_ATTRIBUTES.slice() });
     return true;
   }
   function structureMutationCallback() {
@@ -3131,11 +3704,11 @@
   }
   function signalRoute() {
     if (destroyed) return;
-    scan(ROOT.document);
+    scan(ROOT2.document);
     schedule();
   }
   function init() {
-    if (!ROOT.document || initialized) return;
+    if (!ROOT2.document || initialized) return;
     initialized = true;
     if (isCaptureMode()) {
       initCaptureMode();
@@ -3147,20 +3720,21 @@
     ensureStyle();
     bindObserverRoot(selectObserverRoot());
     subscribePreferenceChanges();
-    if (ROOT.document.documentElement && typeof ROOT.MutationObserver === "function") {
-      structureObserver = new ROOT.MutationObserver(structureMutationCallback);
-      structureObserver.observe(ROOT.document.documentElement, { childList: true, subtree: true });
+    if (ROOT2.document.documentElement && typeof ROOT2.MutationObserver === "function") {
+      structureObserver = new ROOT2.MutationObserver(structureMutationCallback);
+      structureObserver.observe(ROOT2.document.documentElement, { childList: true, subtree: true });
     }
-    bind(ROOT, "popstate", signalRoute);
-    bind(ROOT, "hashchange", signalRoute);
-    bind(ROOT.document, "visibilitychange", signalRoute);
+    bind(ROOT2, "popstate", signalRoute);
+    bind(ROOT2, "hashchange", signalRoute);
+    bind(ROOT2.document, "visibilitychange", signalRoute);
     lastUrl = "";
-    scan(ROOT.document);
+    scan(ROOT2.document);
     syncJumpUi();
     syncLibraryUi();
     syncBatchBar();
+    syncGoodsPanel(getCurrentRoute());
     selection.hydrate().then(() => {
-      syncAllCheckboxes(ROOT.document);
+      syncAllCheckboxes(ROOT2.document);
       updateBatchBarCount();
     }, () => {
     });
@@ -3174,8 +3748,8 @@
     scheduled = false;
     pending.clear();
     clearFallbackTokenCache();
-    if (observer) observer.disconnect();
-    observer = null;
+    if (observer2) observer2.disconnect();
+    observer2 = null;
     observerRoot = null;
     if (structureObserver) structureObserver.disconnect();
     structureObserver = null;
@@ -3184,13 +3758,14 @@
     removeJumpUi();
     removeLibraryUi();
     removeBatchBar();
+    removeGoodsPanel();
     clearBatchProgress();
     batchDownloadInFlight = false;
     continuousSelect = false;
     saveInFlight = false;
     clearCopyStatus();
     cleanupAll();
-    const style = ROOT.document && ROOT.document.getElementById(STYLE_ID);
+    const style = ROOT2.document && ROOT2.document.getElementById(STYLE_ID);
     if (style) style.remove();
   }
   var pureApi = Object.freeze({
@@ -3232,6 +3807,22 @@
     extractNoteFromInitialStateHtml,
     slimNoteDetail,
     pickBestImageUrl,
+    isGoodsDetailRoute,
+    getGoodsIdFromHref,
+    extractUrlsFromText,
+    looksLikeGoodsImageUrl,
+    isXhsImageCdnUrl,
+    canonicalGoodsImageKey,
+    rankGoodsImageCandidate,
+    dedupeGoodsImages,
+    collectGoodsImageCandidates,
+    toHDGoodsUrl,
+    extensionForMime,
+    buildGoodsZipFileName,
+    buildGoodsImageFileName,
+    buildGoodsInfoText,
+    getGoodsTitleFromDocument,
+    GOODS_FORMAT_MODES,
     buildDetailNoteUrl,
     resolveSaveUrlFromCard,
     cardNoteTargetId,
@@ -3260,17 +3851,17 @@
       setTestRoute(pathname, scheduleChange = true) {
         routeProvider = () => String(pathname || "");
         lastUrl = "";
-        if (scheduleChange) schedule(ROOT.document);
+        if (scheduleChange) schedule(ROOT2.document);
       },
       clearTestRoute() {
         routeProvider = null;
         lastUrl = "";
-        schedule(ROOT.document);
+        schedule(ROOT2.document);
       },
       setTestInitialState(value) {
         getResolver().setTestInitialState(value);
       },
-      scan: () => scan(ROOT.document),
+      scan: () => scan(ROOT2.document),
       flush,
       init,
       destroy,
@@ -3279,7 +3870,7 @@
         batchDownloadInFlight = false;
         if (batchContinuousButton) batchContinuousButton.setAttribute("aria-pressed", "false");
         selection.clear();
-        syncAllCheckboxes(ROOT.document);
+        syncAllCheckboxes(ROOT2.document);
         updateBatchBarCount();
         updateBatchDownloadButton();
       },
@@ -3292,18 +3883,20 @@
       },
       setBatchLayout: (layout) => writeStoredBatchLayout(layout).value,
       getBatchLayoutSnapshot: () => readStoredBatchLayout(),
+      syncGoodsPanel,
+      getGoodsImagesSnapshot,
       setThreshold: (value) => writeStoredThreshold(value),
       getThreshold: () => readStoredThreshold(),
       setFocusPopular: (value, _storage) => writeStoredFocusPopular(value).persisted,
       getFocusPopular: () => readStoredFocusPopular(),
       getCounters: () => Object.assign({}, counters, {
         bindings: eventBindings.length,
-        observerRootIsBody: observerRoot === ROOT.document.body
+        observerRootIsBody: observerRoot === ROOT2.document.body
       })
     });
-    ROOT.__XHS_ENHANCED_TEST_API__ = testApi;
+    ROOT2.__XHS_ENHANCED_TEST_API__ = testApi;
   }
-  if (ROOT.document) {
+  if (ROOT2.document) {
     ready.then(() => {
       init();
     });

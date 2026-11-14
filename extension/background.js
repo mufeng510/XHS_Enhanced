@@ -6,7 +6,7 @@
 
   // src/background/index.js
   var MAX_BODY_BYTES = 32 * 1024 * 1024;
-  var STATIC_EXACT_HOSTS = /* @__PURE__ */ new Set(["ci.xiaohongshu.com"]);
+  var STATIC_EXACT_HOSTS = /* @__PURE__ */ new Set(["ci.xiaohongshu.com", "img.xiaohongshu.com", "qimg.xiaohongshu.com"]);
   var SAFE_METHODS = /* @__PURE__ */ new Set(["GET", "HEAD"]);
   function hostOf(url) {
     try {

@@ -15,10 +15,10 @@
 ## host_permissions（静态）
 
 ### `https://xhscdn.com/*` 与 `https://*.xhscdn.com/*`
-读取无水印笔记封面的图像字节（sns-webpic-qc / sns-img-qc / sns-img-hw / sns-avatar-qc 等 CDN 主机）。页面内 `fetch` 会被 CDN 的跨域与防盗链策略拦截，必须由扩展后台服务读取后再交给页面（用于复制到剪贴板或下载到本地）。后台仅对这些主机、且仅针对 GET/HEAD 放行；其余一律拒绝。
+读取无水印笔记封面的图像字节（sns-webpic-qc / sns-img-qc / sns-img-hw / sns-avatar-qc 等 CDN 主机），以及商品详情页高清商品图（fe-img-qc / sns-webpic-qc 等）。页面内 `fetch` 会被 CDN 的跨域与防盗链策略拦截，必须由扩展后台服务读取后再交给页面（用于复制到剪贴板、下载到本地、打包进 zip）。后台仅对这些主机、且仅针对 GET/HEAD 放行；其余一律拒绝。
 
 ### `https://*.xiaohongshu.com/*`
-封面**原图对象**存储在 `ci.xiaohongshu.com`（与 CDN 不同域），无水印原图必须从这里读取。后台静态放行仅限 `ci.xiaohongshu.com` 这一个主机且仅 GET/HEAD。扩展不读取小红书任何账号数据、Cookie 或请求内容，也不发起 POST/PUT 等变更请求。
+封面**原图对象**存储在 `ci.xiaohongshu.com`（与 CDN 不同域），无水印原图必须从这里读取；商品详情页图片还可能落在 `img.xiaohongshu.com`、`qimg.xiaohongshu.com`（小红书自有图片 CDN，与本 host 权限同一来源）。后台静态放行仅限 `ci.xiaohongshu.com`、`img.xiaohongshu.com`、`qimg.xiaohongshu.com` 这三个主机且仅 GET/HEAD。扩展不读取小红书任何账号数据、Cookie 或请求内容，也不发起 POST/PUT 等变更请求。
 
 ## optional_host_permissions（运行时才申请）
 
@@ -32,9 +32,9 @@
 ### `https://www.xiaohongshu.com/user/profile/*`
 ### `https://www.xiaohongshu.com/explore*`
 ### `https://www.xiaohongshu.com/discovery/item/*`
+### `https://www.xiaohongshu.com/goods-detail/*`
 
-只在小红书网页版生效：高亮热门笔记、插入复制/下载/保存按钮、跳转控件、批量勾选复选框、底部批量下载栏。不在任何其他站点注入。
-批量下载笔记图片时，所需的内图来自笔记的服务端渲染详情页（`/explore/<id>`）：后台服务**带浏览器 cookie** 读取该 HTML 中的内联 `__INITIAL_STATE__`（直拉失败时降级为后台隐藏标签页复核）；同一笔记不引用其它账号数据。
+只在小红书网页版生效：高亮热门笔记、插入复制/下载/保存按钮、跳转控件、批量勾选复选框、底部批量下载栏；在商品详情页（goods-detail）注入“商品高清图下载”悬浮面板（扫描页面商品图并打包为单个 zip 保存）。不在任何其他站点注入。批量下载笔记图片时，所需的内图来自笔记的服务端渲染详情页（`/explore/<id>`）：后台服务**带浏览器 cookie** 读取该 HTML 中的内联 `__INITIAL_STATE__`（直拉失败时降级为后台隐藏标签页复核）；同一笔记不引用其它账号数据。商品图下载同样仅读小红书 CDN 上的图片字节。
 
 > 批量下载不申请任何新增权限（不使用 `downloads`）：zip 在用户本机生成（stored 条目 + CRC32，纯 JS 实现，无压缩），通过浏览器的单次下载手势保存到本地。内图与封面字节均仅从小红书 CDN 读取。
 

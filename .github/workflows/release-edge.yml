@@ -1,0 +1,116 @@
+name: Release Edge Add-ons
+
+# Publishes the packaged extension to the Microsoft Edge Add-ons store
+# (Update REST API v1.1). Triggers on a published GitHub release; the release
+# tag (with an optional leading "v") must equal extension/manifest.json's
+# version, e.g. tag v2.2.0 -> manifest 2.2.0. Manual dispatch is available for
+# re-runs and dry-run validation; it does NOT create a release.
+#
+# Required repository secrets:
+#   EDGE_CLIENT_ID   Partner Center → Publish API → Client ID
+#   EDGE_API_KEY     Partner Center → Publish API → API key
+#   EDGE_PRODUCT_ID  Product ID of the published extension (GUID)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Expected manifest version (x.y.z); empty = use manifest.json as-is'
+        required: false
+        type: string
+      notes:
+        description: 'Notes for certification (shown in Partner Center)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Validate inputs only; do NOT call the Edge Add-ons API'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # attach the zip to the GitHub release
+
+env:
+  NODE_VERSION: 22
+
+jobs:
+  publish:
+    name: Package & publish to Edge Add-ons
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Static checks
+        run: npm run check
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      # Informational in the release pipeline; CI on master is the enforced
+      # gate for the headless browser harness.
+      - name: Browser harness (informational)
+        run: npm run test:browser
+        continue-on-error: true
+
+      - name: Resolve version
+        id: version
+        run: |
+          MANIFEST_VERSION="$(node -p "require('./extension/manifest.json').version")"
+          echo "manifest=$MANIFEST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "version=$MANIFEST_VERSION" >> "$GITHUB_ENV"
+
+      - name: Verify tag/input matches manifest version (release only)
+        if: github.event_name == 'release'
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$TAG" != "$MANIFEST_VERSION" ]; then
+            echo "Release tag '$GITHUB_REF_NAME' (normalized '$TAG') does not match manifest version '$MANIFEST_VERSION'. Bump extension/manifest.json + package.json first."
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches manifest version $MANIFEST_VERSION"
+        env:
+          MANIFEST_VERSION: ${{ steps.version.outputs.manifest }}
+
+      - name: Verify dispatch input matches manifest version
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+        run: |
+          if [ "${{ inputs.version }}" != "$MANIFEST_VERSION" ]; then
+            echo "Dispatch input version '${{ inputs.version }}' does not match manifest version '$MANIFEST_VERSION'."
+            exit 1
+          fi
+        env:
+          MANIFEST_VERSION: ${{ steps.version.outputs.manifest }}
+
+      - name: Package extension zip
+        run: npm run package
+
+      - name: Publish to Edge Add-ons
+        env:
+          EDGE_CLIENT_ID: ${{ secrets.EDGE_CLIENT_ID }}
+          EDGE_API_KEY: ${{ secrets.EDGE_API_KEY }}
+          EDGE_PRODUCT_ID: ${{ secrets.EDGE_PRODUCT_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          ZIP="dist/xhs-enhanced-extension-v${VERSION}.zip"
+          NOTES="${NOTES:-GitHub release v${VERSION} — automated submission from Actions}"
+          ARGS=(--zip "$ZIP" --notes "$NOTES")
+          if [ "${DRY_RUN:-false}" = "true" ]; then ARGS+=(--dry-run); fi
+          node scripts/edge-publish.cjs "${ARGS[@]}"
+
+      - name: Attach zip to the GitHub release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" "dist/xhs-enhanced-extension-v${VERSION}.zip" --clobber

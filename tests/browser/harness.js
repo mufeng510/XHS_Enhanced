@@ -725,6 +725,67 @@
     navigate('/search_result'); await checkpoint();
   }
 
+  async function goodsDetailDownload() {
+    api.setTestRoute('/goods-detail/685d0fe3c16548001691655c');
+    await checkpoint();
+    const panel = document.getElementById('xhs-enhanced-goods-panel');
+    assert(Boolean(panel), 'goods panel appears on goods-detail route');
+    assert(document.getElementById('xhs-enhanced-goods-scan') && document.getElementById('xhs-enhanced-goods-download'), 'goods panel exposes scan and download buttons');
+    assert(document.querySelectorAll('#xhs-enhanced-goods-format option').length === 3, 'goods format selector offers png/original/jpeg');
+    // Product-gallery-like images plus a static JS asset and an avatar that
+    // must be filtered out by the default scan.
+    sandbox.replaceChildren();
+    const productImg = document.createElement('img');
+    productImg.setAttribute('src', 'https://sns-webpic-qc.xhscdn.com/base1/1040g2goods0000000000000000000000000001!nd_dft_wlteh_webp_3');
+    const galleryImg = document.createElement('img');
+    galleryImg.setAttribute('src', 'https://fe-img-qc.xhscdn.com/base2/1040g2goods0000000000000000000000000002?imageView2/2/w/540/format/webp');
+    const staticAsset = document.createElement('img');
+    staticAsset.setAttribute('src', 'https://fe-static.xhscdn.com/formula-static/goods-detail/public/js/main.d4927ba.js');
+    const avatarImg = document.createElement('img');
+    avatarImg.setAttribute('src', 'https://sns-avatar-qc.xhscdn.com/avatar/1040g2goods0000000000000000000000000003');
+    sandbox.append(productImg, galleryImg, staticAsset, avatarImg);
+    document.getElementById('xhs-enhanced-goods-scan').click();
+    await checkpoint();
+    const snapshot = api.getGoodsImagesSnapshot();
+    assert(snapshot.some(u => u.includes('base1/1040g2goods0000000000000000000000000001')), 'scan captures product gallery image');
+    assert(snapshot.some(u => u.includes('base2/1040g2goods0000000000000000000000000002')), 'scan captures gallery image with imageView2 query');
+    assert(!snapshot.some(u => /\.js($|\?|!)/.test(u)), 'scan rejects static JS assets on the CDN');
+    assert(!snapshot.some(u => /avatar/i.test(u)), 'scan excludes decorative avatars by default');
+    // Opt-in: decorative images can be included.
+    const decor = document.getElementById('xhs-enhanced-goods-decorations');
+    decor.checked = true;
+    decor.dispatchEvent(new Event('change'));
+    await checkpoint();
+    assert(api.getGoodsImagesSnapshot().some(u => /avatar/i.test(u)), 'decorations toggle includes avatars');
+    decor.checked = false;
+    decor.dispatchEvent(new Event('change'));
+    await checkpoint();
+    assert(!api.getGoodsImagesSnapshot().some(u => /avatar/i.test(u)), 'decorations toggle restores filtering');
+    // Format switch must not break the panel or the scan.
+    const format = document.getElementById('xhs-enhanced-goods-format');
+    format.value = 'jpeg';
+    format.dispatchEvent(new Event('change'));
+    await checkpoint();
+    format.value = 'png';
+    format.dispatchEvent(new Event('change'));
+    await checkpoint();
+    // Download: every fetched byte is the harness mock JPEG, so the zip flow
+    // completes and the status line announces the save.
+    document.getElementById('xhs-enhanced-goods-download').click();
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
+      const status = document.getElementById('xhs-enhanced-goods-status');
+      if (status && /已下载|下载失败|失败/.test(status.textContent)) break;
+      await delay(50);
+    }
+    const finalStatus = document.getElementById('xhs-enhanced-goods-status');
+    assert(finalStatus && /已下载/.test(finalStatus.textContent), 'download completes and reports the saved count', finalStatus ? finalStatus.textContent : '<no status node>');
+    // Leaving the goods route removes the panel (SPA navigation safety).
+    api.setTestRoute('/search_result');
+    await checkpoint();
+    assert(!document.getElementById('xhs-enhanced-goods-panel'), 'leaving goods-detail removes the panel');
+  }
+
   async function bodyObserverQuiescence() {
     api.setTestRoute('/search_result');
     const fallbackRoot = document.createElement('div'); fallbackRoot.id = 'sandbox';
@@ -749,7 +810,7 @@
     document.title = `XHS-HARNESS|${status}|${terminalWrites}|${assertions}|${encodeURIComponent(failures[0] || '')}`;
   }
 
-  const suiteTimeout = setTimeout(() => { failures.push('suite timeout'); finish('fail'); }, 8000);
+  const suiteTimeout = setTimeout(() => { failures.push('suite timeout'); finish('fail'); }, 20000);
   (async () => {
     try {
       assert(Boolean(api), 'test API installed');
@@ -760,6 +821,7 @@
       await batchSelectionAndDownload();
       await batchScopeModeAndInnerImages();
       await batchLayoutFlatMode();
+      await goodsDetailDownload();
       await dynamicAndAttributes();
       await jumpNavigation();
       await focusMode();

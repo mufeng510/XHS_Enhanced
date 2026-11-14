@@ -1,0 +1,138 @@
+'use strict';
+// Unit tests for the goods-detail (商品详情页) HD image download feature.
+// The bundle is vm-loaded like the other suites; pure helpers come from
+// __XHS_ENHANCED_TEST_API__. DOM/panel behavior is covered by the browser
+// harness (tests/browser/harness.js).
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+
+function load(pathname = '/goods-detail/685d0fe3c16548001691655c', extras) {
+  const context = {
+    console,
+    location: { pathname, href: 'https://www.xiaohongshu.com' + pathname },
+    __XHS_ENHANCED_TEST_MODE__: true,
+    atob: value => Buffer.from(String(value), 'base64').toString('binary'),
+    btoa: value => Buffer.from(String(value), 'binary').toString('base64'),
+    TextEncoder,
+    Uint8Array,
+    ArrayBuffer,
+    URL,
+    URLSearchParams
+  };
+  if (extras) Object.assign(context, extras);
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync('extension/content.js', 'utf8'), context);
+  return context.__XHS_ENHANCED_TEST_API__;
+}
+
+const IMG_A = 'https://sns-webpic-qc.xhscdn.com/20261113/tt/1040g2AAA000000000000000000000000000000001!nd_dft_wlteh_webp_3';
+const IMG_B = 'https://fe-img-qc.xhscdn.com/20261113/tt/1040g2BBB000000000000000000000000000000002?imageView2/2/w/540/format/webp';
+const IMG_B_HD = 'https://fe-img-qc.xhscdn.com/20261113/tt/1040g2BBB000000000000000000000000000000002?imageView2/2/w/1080/format/webp';
+
+test('route predicate matches only goods-detail pages', () => {
+  const api = load();
+  assert.equal(api.isGoodsDetailRoute('/goods-detail/685d0fe3c16548001691655c'), true);
+  assert.equal(api.isGoodsDetailRoute('https://www.xiaohongshu.com/goods-detail/685d0fe3c16548001691655c?xsec_token=abc'), true);
+  assert.equal(api.isGoodsDetailRoute('/goods-detail/'), false);
+  assert.equal(api.isGoodsDetailRoute('/goods-detail'), false);
+  assert.equal(api.isGoodsDetailRoute('/explore/685d0fe3c16548001691655c'), false);
+  assert.equal(api.isGoodsDetailRoute('/search_result'), false);
+  assert.equal(api.isGoodsDetailRoute(''), false);
+  assert.equal(api.getGoodsIdFromHref('/goods-detail/685d0fe3c16548001691655c?xsec_token=z'), '685d0fe3c16548001691655c');
+  assert.equal(api.getGoodsIdFromHref('/goods-detail/'), '');
+});
+
+test('html text scan extracts CDN urls, unescapes \\u002F and trims punctuation', () => {
+  const api = load();
+  const html = '{"a":"https:\\u002F\\u002Fsns-webpic-qc.xhscdn.com\\u002F20261113\\u002Ftt\\u002F1040g2AAA000000000000000000000000000000001!nd_dft_wlteh_webp_3",'
+    + '"b":"https://fe-img-qc.xhscdn.com/base/BBB?imageView2/2/w/540/format/webp,",'
+    + '"c":"https://example.com/not-xhs.png",'
+    + '"d":"notaurl"}';
+  const urls = api.extractUrlsFromText(html);
+  assert(urls.some(u => u.includes('sns-webpic-qc.xhscdn.com/20261113/tt/1040g2AAA')), 'escaped url unescaped and extracted');
+  assert(urls.some(u => u === 'https://fe-img-qc.xhscdn.com/base/BBB?imageView2/2/w/540/format/webp'), 'trailing comma trimmed');
+  assert(!urls.some(u => u.includes('example.com')) || urls.includes('https://example.com/not-xhs.png'), 'non-xhs url may appear in raw extraction but is filtered later');
+  assert(!urls.some(u => u.includes('notaurl')), 'plain text is not a url');
+});
+
+test('goods image url filter rejects static assets, keeps images, honors decorations flag', () => {
+  const api = load();
+  assert.equal(api.looksLikeGoodsImageUrl(IMG_A), true);
+  assert.equal(api.looksLikeGoodsImageUrl(IMG_B), true);
+  assert.equal(api.looksLikeGoodsImageUrl('https://fe-static.xhscdn.com/formula-static/goods-detail/public/js/main.d4927ba.js'), false);
+  assert.equal(api.looksLikeGoodsImageUrl('https://fe-static.xhscdn.com/formula-static/goods-detail/public/css/allStyle.css'), false);
+  assert.equal(api.looksLikeGoodsImageUrl('https://fe-img-qc.xhscdn.com/base/font.woff2'), false);
+  assert.equal(api.looksLikeGoodsImageUrl('https://sns-avatar-qc.xhscdn.com/avatar/1040g2AAA000000000000000000000000000000004'), false);
+  assert.equal(api.looksLikeGoodsImageUrl('https://sns-avatar-qc.xhscdn.com/avatar/1040g2AAA000000000000000000000000000000004', { includeDecorations: true }), true);
+  assert.equal(api.looksLikeGoodsImageUrl('https://example.com/image.png'), false);
+  assert.equal(api.looksLikeGoodsImageUrl('http://sns-webpic-qc.xhscdn.com/base/AAA'), true); // http kept for completeness
+  assert.equal(api.isXhsImageCdnUrl(IMG_A), true);
+  assert.equal(api.isXhsImageCdnUrl('https://fe-static.xhscdn.com/x.js'), true); // host-level check only; asset filter lives in looksLikeGoodsImageUrl
+  assert.equal(api.isXhsImageCdnUrl('https://example.com/x.png'), false);
+});
+
+test('canonical key collapses same-image variants; dedupe keeps highest quality', () => {
+  const api = load();
+  const k1 = api.canonicalGoodsImageKey(IMG_B);
+  const k2 = api.canonicalGoodsImageKey(IMG_B_HD);
+  assert.equal(k1, k2, 'same base with different imageView2 widths collapse');
+  const deduped = api.dedupeGoodsImages([IMG_B, IMG_B_HD, IMG_A]);
+  assert.equal(deduped.length, 2);
+  assert(deduped.some(u => u === IMG_B_HD), 'wider imageView2 candidate wins');
+  const master = 'https://sns-webpic-qc.xhscdn.com/20261113/tt/1040g2AAA000000000000000000000000000000001!nd_dft_wlteh_webp_3';
+  const derivative = master + '?imageView2/2/w/540/format/webp';
+  const deduped2 = api.dedupeGoodsImages([derivative, master]);
+  assert(deduped2.includes(master), '!nd_ master wins over imageView2 derivative');
+  assert(!api.dedupeGoodsImages(['https://example.com/a.png']).length, 'non-cdn urls are dropped');
+});
+
+test('toHDGoodsUrl rewrites query per mode and survives junk input', () => {
+  const api = load();
+  const src = 'https://sns-webpic-qc.xhscdn.com/tt/1040g2AAA!nd_dft_wlteh_webp_3?imageView2/2/w/540/format/webp&x=1';
+  assert.equal(api.toHDGoodsUrl(src, 'png'), 'https://sns-webpic-qc.xhscdn.com/tt/1040g2AAA!nd_dft_wlteh_webp_3?imageView2/2/format/png');
+  assert.equal(api.toHDGoodsUrl(src, 'jpeg'), 'https://sns-webpic-qc.xhscdn.com/tt/1040g2AAA!nd_dft_wlteh_webp_3?imageView2/2/format/jpeg/q/90');
+  assert.equal(api.toHDGoodsUrl(src, 'original'), 'https://sns-webpic-qc.xhscdn.com/tt/1040g2AAA!nd_dft_wlteh_webp_3');
+  assert.equal(api.toHDGoodsUrl('not a url', 'png'), 'not a url');
+  assert.equal(api.toHDGoodsUrl('', 'png'), '');
+});
+
+test('collectGoodsImageCandidates merges dom+text, filters and dedupes', () => {
+  const api = load();
+  const dom = [IMG_B, 'https://fe-static.xhscdn.com/formula-static/goods-detail/public/css/allStyle.css'];
+  const text = [IMG_A, IMG_B, 'https://sns-avatar-qc.xhscdn.com/avatar/1040g2AAA000000000000000000000000000000004'];
+  const out = api.collectGoodsImageCandidates(dom, text, {});
+  assert.equal(out.length, 2, 'css and avatar dropped, duplicate base collapsed');
+  assert(out.includes(IMG_A));
+  const withDecor = api.collectGoodsImageCandidates(dom, text, { includeDecorations: true });
+  assert.equal(withDecor.length, 3, 'avatar kept when decorations are included');
+});
+
+test('zip naming, entry naming, info text and mime extension mapping', () => {
+  const api = load();
+  const name = api.buildGoodsZipFileName(new Date(2026, 10, 14, 15, 30), 12, '685d0fe3c16548001691655c');
+  assert.equal(name, '小红书商品高清图_685d0fe3c16548001691655c_20261114_1530_12张.zip');
+  const split = api.buildGoodsZipFileName(new Date(2026, 10, 14, 15, 30), 12, '685d0fe3c16548001691655c', 1, 2);
+  assert.equal(split, '小红书商品高清图_685d0fe3c16548001691655c_20261114_1530_12张_part2.zip');
+  const badDate = api.buildGoodsZipFileName('nope', 3, '');
+  assert.match(badDate, /^小红书商品高清图_unknown_\d{8}_\d{4}_3张\.zip$/);
+  assert.equal(api.buildGoodsImageFileName(0, 'PNG'), '01.png');
+  assert.equal(api.buildGoodsImageFileName(11, '.jpeg!'), '12.jpeg');
+  assert.equal(api.buildGoodsImageFileName(2, '***'), '03.png');
+  assert.equal(api.extensionForMime('image/jpeg'), 'jpg');
+  assert.equal(api.extensionForMime('IMAGE/PNG'), 'png');
+  assert.equal(api.extensionForMime('image/webp; charset=binary'), 'webp');
+  assert.equal(api.extensionForMime(''), 'png');
+  assert.equal(api.extensionForMime('', 'jpg'), 'jpg');
+  const info = api.buildGoodsInfoText({ pageUrl: 'https://www.xiaohongshu.com/goods-detail/abc', goodsId: 'abc', title: '某商品', scannedAt: '2026/11/14 15:30', count: 5, mode: 'png' });
+  assert(info.includes('某商品') && info.includes('https://www.xiaohongshu.com/goods-detail/abc') && info.includes('图片数量：5') && info.includes('高清 PNG'), 'info.txt carries product metadata');
+});
+
+test('goods title parser strips the 小红书 suffix/prefix', () => {
+  const api = load();
+  assert.equal(api.getGoodsTitleFromDocument({ title: '某品牌保温杯 - 小红书' }), '某品牌保温杯');
+  assert.equal(api.getGoodsTitleFromDocument({ title: '小红书 - 某品牌保温杯' }), '某品牌保温杯');
+  assert.equal(api.getGoodsTitleFromDocument({ title: '' }), '');
+  assert.equal(api.getGoodsTitleFromDocument(null), '');
+});

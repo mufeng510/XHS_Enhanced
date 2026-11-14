@@ -23,6 +23,11 @@
   - 勾选列表在刷新后保留（浏览器会话级）；内图来自详情页 `__INITIAL_STATE__`（后台服务带登录态直拉详情页，失败时退化为后台隐藏标签页复核）；视频笔记没有内图，“只内图”时自动跳过并提示；
   - 文件组织方式可在扩展选项页「批量下载」一栏切换：**按笔记建文件夹（默认）**或**平铺到同一个文件夹**（不分子文件夹，文件名带序号与笔记 ID，如 `001_<笔记id>_01_封面.jpg`）；
   - 一次点击打包下载：输出单个 `XHS笔记_<时间>_<N>篇.zip`（每笔记一个文件夹，封面为 `01_封面.jpg`，内图 `02…`；图片原样或就近 JPEG 重编码；超过 200MB 自动分卷）；
+- **商品详情页（`/goods-detail/*`）下载商品高清图**：
+  - 页面右侧注入悬浮面板（📷 商品高清图下载）；
+  - “扫描图片”一键收集页面中的商品高清图：DOM 渲染图（含 `srcset` 最大候选、懒加载 `data-*`、背景图）+ 整页 HTML 文本中的 CDN URL，自动去重并排除 JS/CSS/字体、头像/表情等修饰图（可手动包含）；
+  - 三种高清格式可选：**高清 PNG**（默认，`?imageView2/2/format/png`）/ **原始格式** / **JPEG q90**；
+  - “下载高清图”打包为单个 `小红书商品高清图_<商品ID>_<时间>_<N>张.zip`（附 `00_商品信息.txt`：标题/链接/ID/时间/格式），超过 200MB 自动分卷；不逐张触发下载，不需要 `downloads` 权限；
 - **一键保存到自建内容库（XHS_ALL_IN_ONE）**：
   - 笔记卡片悬浮“保存入库”按钮；
   - 笔记详情视图右上角“保存到内容库”浮动按钮（覆盖 `/explore/<id>`、`/discovery/item/<id>`，以及从搜索结果页/用户主页/首页打开的详情弹窗地址）；
@@ -95,6 +100,7 @@ npm run build     # 生成 extension/ 下的 content.js / options.js / backgroun
 - `https://www.xiaohongshu.com/user/profile/*`
 - `https://www.xiaohongshu.com/explore*`（首页 feed 与笔记详情页）
 - `https://www.xiaohongshu.com/discovery/item/*`
+- `https://www.xiaohongshu.com/goods-detail/*`（商品详情页，仅“商品高清图下载”面板）
 
 ## 点赞数规则
 
@@ -112,16 +118,20 @@ extension/            扩展本体（manifest.json + 构建产物，直接可加
   options.html|css    扩展选项页（增强设置 + 内容库设置）
 src/
   lib/                纯函数库：pure（解析/路由/封面URL）、settings（存储）、remote（后台代理）、
-                      library（内容库 API）、cover（封面拉取/转码/剪贴板）、initial-state（__INITIAL_STATE__ 解析）、env、text
-  content/index.js    内容脚本入口（高亮/跳转/卡片按钮/观察者）
+                      library（内容库 API）、cover（封面拉取/转码/剪贴板）、initial-state（__INITIAL_STATE__ 解析）、
+                      goods（商品高清图：路由/URL 过滤去重/高清改写/zip 命名）、env、text、selection、zip
+  content/index.js    内容脚本入口（高亮/跳转/卡片按钮/批量/观察者/测试 seam）
+  content/goods.js    商品详情页悬浮面板（扫描/格式/下载 zip，懒加载自动重扫）
   options/options.js  选项页逻辑
-  background/index.js 后台 service worker（特权 fetch 代理）
+  background/index.js 后台 service worker（特权 fetch 代理 + 隐藏标签页采集）
 tests/
   unit/               node:test 单测（vm 加载 extension/content.js 与 extension/background.js）
   browser/            Chrome headless 断言 harness（fixtures + iframe）
   fixtures/           搜索/主页/动态加载页 fixture
-scripts/              build.cjs、static-check.cjs、run-browser-tests.{sh,ps1}
+scripts/              build.cjs、static-check.cjs、run-browser-tests.{sh,ps1}、
+                      package.mjs（打包 dist/*.zip）、edge-publish.cjs（Edge Add-ons 更新 API）
 store/                上架素材：listing.md、permissions.md、privacy-policy.md、checklist.md、截图
+.github/workflows/    ci.yml（push/PR 构建+测试）、release-edge.yml（发布 Release 自动更新 Edge 商店）
 ```
 
 ## 本地验证
@@ -129,6 +139,7 @@ store/                上架素材：listing.md、permissions.md、privacy-polic
 ```bash
 npm install
 npm test                  # = check + test:unit + test:browser（Windows 走 PowerShell）
+npm run package           # 产出 dist/xhs-enhanced-extension-v<版本>.zip（商店上传物）
 ```
 
 Linux / macOS：
@@ -137,7 +148,16 @@ Linux / macOS：
 npm run check && npm run test:unit && npm run test:browser:unix
 ```
 
-浏览器环节默认调用 `scripts/run-browser-tests.sh`（无头 Chrome），加载 `extension/content.js` 与 chrome.* mock，断言高亮/跳转/复制/保存/生命周期行为。
+浏览器环节默认调用 `scripts/run-browser-tests.sh`（无头 Chrome），加载 `extension/content.js` 与 chrome.* mock，断言高亮/跳转/复制/保存/批量/商品图面板/生命周期行为。
+
+## 自动发布（Edge Add-ons）
+
+创建 **GitHub Release**（tag 形如 `v2.2.0`，需与 `extension/manifest.json` 的 version 一致）后，`release-edge.yml` workflow 会自动：校验版本一致性 → 跑 check 与单测 → 打包 zip → 通过 Edge Add-ons Update REST API v1.1（仓库 secrets `EDGE_CLIENT_ID` / `EDGE_API_KEY` / `EDGE_PRODUCT_ID`）上传草稿扩展并提交审核 → 把 zip 附到 Release。
+
+- 发布=提交 Edge 审核队列，非立即上线；审核通过后用户自动获得更新；
+- `workflow_dispatch` 手动触发默认为 dry-run（只校验、不调 Edge API），便于预演；
+- Chrome Web Store 侧未配置 API 凭据，更新仍需手动上传同一个 zip（见 `store/checklist.md`）；
+- CI（`ci.yml`）在每次 push/PR 时运行构建与全部测试。
 
 ## 相关链接
 

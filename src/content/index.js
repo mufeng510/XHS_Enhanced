@@ -79,6 +79,25 @@ import {
   MAX_ZIP_BYTES
 } from '../lib/zip.js';
 import { createSelectionStore, SELECTION_STORAGE_KEY } from '../lib/selection.js';
+import {
+  isGoodsDetailRoute,
+  getGoodsIdFromHref,
+  extractUrlsFromText,
+  looksLikeGoodsImageUrl,
+  isXhsImageCdnUrl,
+  canonicalGoodsImageKey,
+  rankGoodsImageCandidate,
+  dedupeGoodsImages,
+  collectGoodsImageCandidates,
+  toHDGoodsUrl,
+  extensionForMime,
+  buildGoodsZipFileName,
+  buildGoodsImageFileName,
+  buildGoodsInfoText,
+  getGoodsTitleFromDocument,
+  GOODS_FORMAT_MODES
+} from '../lib/goods.js';
+import { syncGoodsPanel, removeGoodsPanel, getGoodsImagesSnapshot } from './goods.js';
 
 const ROOT = getRoot();
 const TEST_MODE = isTestMode();
@@ -1274,6 +1293,21 @@ function onFocusToggleClick() {
       #${BATCH_SCOPE_ID} button[aria-pressed="true"]{background:#ff2442;color:#fff}
       #${BATCH_SCOPE_ID} button:focus-visible,#${BATCH_PROGRESS_ID}:focus-visible{outline:2px solid #fff;outline-offset:2px}
       #${BATCH_PROGRESS_ID}{position:fixed;top:226px;right:24px;z-index:2147483646;max-width:300px;padding:9px 13px;border-radius:8px;background:rgba(30,30,30,.93);color:#fff;font:13px/1.5 system-ui,sans-serif;pointer-events:none}
+      #xhs-enhanced-goods-panel{position:fixed;right:20px;top:150px;z-index:2147483646;width:252px;padding:14px 14px 12px;border-radius:12px;background:rgba(30,30,30,.93);color:#fff;font:13px/1.5 system-ui,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.35);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+      .xhs-enhanced-goods-title{font-weight:700;font-size:14px;margin-bottom:8px}
+      .xhs-enhanced-goods-row{display:flex;gap:8px;margin-bottom:10px}
+      #xhs-enhanced-goods-scan,#xhs-enhanced-goods-download{flex:1;border:0;border-radius:8px;padding:8px 10px;font:600 13px/1.4 system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+      .xhs-enhanced-goods-secondary{background:rgba(255,255,255,.14);color:#fff}
+      .xhs-enhanced-goods-secondary:hover{background:rgba(255,255,255,.24)}
+      .xhs-enhanced-goods-primary{background:#ff2442;color:#fff}
+      .xhs-enhanced-goods-primary:hover{background:#e61e3c}
+      #xhs-enhanced-goods-scan:disabled,#xhs-enhanced-goods-download:disabled{opacity:.55;cursor:default}
+      .xhs-enhanced-goods-field{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;color:rgba(255,255,255,.85)}
+      .xhs-enhanced-goods-field select{background:rgba(255,255,255,.12);color:#fff;border:0;border-radius:6px;padding:5px 8px;font:13px/1.4 system-ui,sans-serif}
+      .xhs-enhanced-goods-field select:focus-visible,#xhs-enhanced-goods-scan:focus-visible,#xhs-enhanced-goods-download:focus-visible,.xhs-enhanced-goods-check input:focus-visible{outline:2px solid #fff;outline-offset:2px}
+      .xhs-enhanced-goods-check{display:flex;align-items:center;gap:6px;color:rgba(255,255,255,.85);margin-bottom:8px;cursor:pointer}
+      .xhs-enhanced-goods-count{color:#fff;font-weight:700;margin:2px 0 4px}
+      .xhs-enhanced-goods-status{min-height:1.4em;color:rgba(255,255,255,.78);margin:0;word-break:break-all}
     `;
     (ROOT.document.head || ROOT.document.documentElement).appendChild(style);
   }
@@ -1566,6 +1600,7 @@ let preferenceChangeHandler = null;
     syncJumpUi();
     syncLibraryUi();
     syncBatchBar();
+    syncGoodsPanel(getCurrentRoute());
     const url = ROOT.location ? ROOT.location.href : getCurrentRoute();
     if (url !== lastUrl) {
       lastUrl = url;
@@ -1704,6 +1739,7 @@ let preferenceChangeHandler = null;
     syncJumpUi();
     syncLibraryUi();
     syncBatchBar();
+    syncGoodsPanel(getCurrentRoute());
     selection.hydrate().then(() => {
       syncAllCheckboxes(ROOT.document);
       updateBatchBarCount();
@@ -1729,6 +1765,7 @@ let preferenceChangeHandler = null;
     removeJumpUi();
     removeLibraryUi();
     removeBatchBar();
+    removeGoodsPanel();
     clearBatchProgress();
     batchDownloadInFlight = false;
     continuousSelect = false;
@@ -1752,6 +1789,11 @@ let preferenceChangeHandler = null;
     parseBaseUrl, readLibraryConfig, parseTokenExp, buildCrawlPayload,
     parseInitialStateFromScriptText,
     extractNoteFromInitialStateHtml, slimNoteDetail, pickBestImageUrl,
+    isGoodsDetailRoute, getGoodsIdFromHref, extractUrlsFromText,
+    looksLikeGoodsImageUrl, isXhsImageCdnUrl, canonicalGoodsImageKey,
+    rankGoodsImageCandidate, dedupeGoodsImages, collectGoodsImageCandidates,
+    toHDGoodsUrl, extensionForMime, buildGoodsZipFileName, buildGoodsImageFileName,
+    buildGoodsInfoText, getGoodsTitleFromDocument, GOODS_FORMAT_MODES,
     buildDetailNoteUrl, resolveSaveUrlFromCard, cardNoteTargetId, resolveCardNoteLink,
     extractCardTitle, snapshotFromCard, onBatchDownload, mapWithConcurrency,
     buildZip, splitZipEntries, buildBatchZipFileName, buildNoteFolderName, buildImageFileName,
@@ -1785,6 +1827,8 @@ let preferenceChangeHandler = null;
       setBatchScope: scope => { batchScopeCache = writeStoredBatchScope(scope).value; updateBatchScopeButtons(); return batchScopeCache; },
       setBatchLayout: layout => writeStoredBatchLayout(layout).value,
       getBatchLayoutSnapshot: () => readStoredBatchLayout(),
+      syncGoodsPanel,
+      getGoodsImagesSnapshot,
       setThreshold: value => writeStoredThreshold(value),
       getThreshold: () => readStoredThreshold(),
       setFocusPopular: (value, _storage) => writeStoredFocusPopular(value).persisted,

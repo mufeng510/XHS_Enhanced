@@ -13,6 +13,8 @@ const exists = relative => fs.existsSync(path.join(root, relative));
 
 execFileSync(process.execPath, ['--check', 'scripts/build.cjs'], { stdio: 'inherit' });
 execFileSync(process.execPath, ['--check', 'scripts/browser-test-server.cjs'], { stdio: 'inherit' });
+execFileSync(process.execPath, ['--check', 'scripts/package.mjs'], { stdio: 'inherit' });
+execFileSync(process.execPath, ['--check', 'scripts/edge-publish.cjs'], { stdio: 'inherit' });
 execFileSync(process.execPath, ['--check', 'tests/browser/harness.js'], { stdio: 'inherit' });
 
 // --- manifest ---------------------------------------------------------------
@@ -24,7 +26,8 @@ assert.deepEqual(manifest.content_scripts[0].matches, [
   'https://www.xiaohongshu.com/search_result*',
   'https://www.xiaohongshu.com/user/profile/*',
   'https://www.xiaohongshu.com/explore*',
-  'https://www.xiaohongshu.com/discovery/item/*'
+  'https://www.xiaohongshu.com/discovery/item/*',
+  'https://www.xiaohongshu.com/goods-detail/*'
 ], 'content script match patterns changed unexpectedly');
 assert.equal(manifest.content_scripts[0].run_at, 'document_idle');
 assert.deepEqual(manifest.content_scripts[0].js, ['content.js']);
@@ -70,7 +73,9 @@ for (const required of [
   'xhs-enhanced-jump-next', 'xhs-enhanced-jump-prev', 'xhs-enhanced-focus-toggle',
   'xhs-enhanced-card--dimmed', 'xhs-enhanced-jump-status', 'xhs-enhanced-copy-status',
   'xhs-enhanced-library-page', 'xhs-enhanced-library-batch', 'xhs-enhanced-settings',
-  'xhs-enhanced-save-library', 'xhs-enhanced-card--popular', 'xhs-enhanced-like--popular'
+  'xhs-enhanced-save-library', 'xhs-enhanced-card--popular', 'xhs-enhanced-like--popular',
+  'xhs-enhanced-goods-panel', 'xhs-enhanced-goods-scan', 'xhs-enhanced-goods-download',
+  'xhs-enhanced-goods-format', 'xhs-enhanced-goods-count', 'xhs-enhanced-goods-status'
 ]) {
   assert(content.includes(required), `bundle missing marker: ${required}`);
 }
