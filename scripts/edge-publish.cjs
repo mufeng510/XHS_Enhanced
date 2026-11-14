@@ -47,9 +47,15 @@ function locationOperationId(response, bodySnippet) {
   const location = response.headers.get('location') || '';
   const id = location.split('/').filter(Boolean).pop() || '';
   if (!id) {
-    throw new Error('API returned ' + response.status + ' without a Location header (operation id missing). Body: ' + bodySnippet);
+    throw new Error('API returned ' + response.status + ' ' + (response.statusText || '') + ' without a Location header (operation id missing). Body: ' + bodySnippet);
   }
   return id;
+}
+
+// Microsoft's API often carries the only error detail in the HTTP reason
+// phrase (e.g. `403 Client ID is Invalid`) with an empty body — always log it.
+function httpStatus(response) {
+  return 'HTTP ' + response.status + (response.statusText ? ' ' + response.statusText : '');
 }
 
 async function fetchWithTimeout(url, options, timeoutMs) {
@@ -84,13 +90,13 @@ async function pollOperation(url, headers, label) {
     }
     if (response.status === 429 || response.status >= 500) {
       transientFailures += 1;
-      if (transientFailures > 5) throw new Error(label + ': status endpoint keeps returning HTTP ' + response.status);
+      if (transientFailures > 5) throw new Error(label + ': status endpoint keeps returning ' + httpStatus(response));
       await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
       continue;
     }
     const text = await response.text();
     if (response.status !== 200) {
-      throw new Error(label + ': status endpoint returned HTTP ' + response.status + ': ' + bodySnippet(text));
+      throw new Error(label + ': status endpoint returned ' + httpStatus(response) + (text ? ': ' + bodySnippet(text) : ''));
     }
     transientFailures = 0;
     let operation = null;
@@ -166,7 +172,7 @@ async function main() {
   }, UPLOAD_TIMEOUT_MS);
   const uploadText = await uploadResponse.text().catch(() => '');
   if (uploadResponse.status !== 202) {
-    console.error('upload failed: HTTP ' + uploadResponse.status + ': ' + bodySnippet(uploadText));
+    console.error('upload failed: ' + httpStatus(uploadResponse) + (uploadText ? ': ' + bodySnippet(uploadText) : ''));
     process.exit(1);
   }
   const uploadOpId = locationOperationId(uploadResponse, bodySnippet(uploadText));
@@ -181,7 +187,7 @@ async function main() {
   }, 60000);
   const publishText = await publishResponse.text().catch(() => '');
   if (publishResponse.status !== 202) {
-    console.error('publish failed: HTTP ' + publishResponse.status + ': ' + bodySnippet(publishText));
+    console.error('publish failed: ' + httpStatus(publishResponse) + (publishText ? ': ' + bodySnippet(publishText) : ''));
     process.exit(1);
   }
   const publishOpId = locationOperationId(publishResponse, bodySnippet(publishText));
