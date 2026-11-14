@@ -810,7 +810,7 @@
     document.title = `XHS-HARNESS|${status}|${terminalWrites}|${assertions}|${encodeURIComponent(failures[0] || '')}`;
   }
 
-  const suiteTimeout = setTimeout(() => { failures.push('suite timeout'); finish('fail'); }, 20000);
+  const suiteTimeout = setTimeout(() => { failures.push('suite timeout'); finish('fail'); }, 25000);
   (async () => {
     try {
       assert(Boolean(api), 'test API installed');

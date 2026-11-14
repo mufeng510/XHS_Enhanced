@@ -37,7 +37,9 @@ cleanup() {
     fi
   done
   if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
-    rm -rf "$WORK_DIR"
+    # Chrome may still be flushing its profile when the trap fires; a failed
+    # rm must not flip an otherwise green verdict to exit 1.
+    rm -rf "$WORK_DIR" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM
