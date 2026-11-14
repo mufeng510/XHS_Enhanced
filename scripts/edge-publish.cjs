@@ -95,7 +95,9 @@ async function pollOperation(url, headers, label) {
       continue;
     }
     const text = await response.text();
-    if (response.status !== 200) {
+    // The operation-status endpoints answer 202 Accepted with the operation
+    // JSON while InProgress (200 once terminal) — both carry the status body.
+    if (response.status !== 200 && response.status !== 202) {
       throw new Error(label + ': status endpoint returned ' + httpStatus(response) + (text ? ': ' + bodySnippet(text) : ''));
     }
     transientFailures = 0;
