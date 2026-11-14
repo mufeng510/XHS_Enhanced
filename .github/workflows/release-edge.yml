@@ -34,7 +34,7 @@ permissions:
   contents: write # attach the zip to the GitHub release
 
 env:
-  NODE_VERSION: 22
+  NODE_VERSION: 24
 
 jobs:
   publish:
