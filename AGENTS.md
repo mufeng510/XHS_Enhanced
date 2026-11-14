@@ -28,6 +28,7 @@ npm run package                # 产出 dist/xhs-enhanced-extension-v<manifest �
   - 发布 = 提交到 Edge 审核队列（非立即上线）。Chrome Web Store 无对应自动化（未配置 Chrome Web Store API 凭据），仍需手动上传。
   - `scripts/edge-publish.cjs` 零依赖（Node ≥18 fetch），密钥只从环境变量读、绝不打印；上传/发布两阶段分别轮询（5s 间隔，10 分钟超时），任一失败非 0 退出。
 - 发布清单见 `store/checklist.md`；Edge 首次上架必须手动（API 只能更新已发布的商品），之后更新走上述流程。
+- **v2.2.0 真实发布尝试（2026-11-14）**：Release + workflow 全链路跑通至 Edge API，但上传草稿包被 **HTTP 401（空 body）** 拒绝 → secrets 待用户在 Partner Center 核对（最常见原因：未启用 v1.1「new experience」而拷贝了 v1 client secret；或 EDGE_CLIENT_ID/EDGE_API_KEY 贴反、含多余空白、已过期）。修复后重跑 failed 的 workflow 即可（`gh run rerun <run-id> --failed`）；dry-run 已验证流水线其余环节（check/单测/打包/env 处理）全绿。
 
 ## 商品详情页高清图下载（M3，2026-11-14 实测）
 
