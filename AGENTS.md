@@ -28,7 +28,7 @@ npm run package                # 产出 dist/xhs-enhanced-extension-v<manifest �
   - 发布 = 提交到 Edge 审核队列（非立即上线）。Chrome Web Store 无对应自动化（未配置 Chrome Web Store API 凭据），仍需手动上传。
   - `scripts/edge-publish.cjs` 零依赖（Node ≥18 fetch），密钥只从环境变量读、绝不打印；上传/发布两阶段分别轮询（5s 间隔，10 分钟超时），任一失败非 0 退出。
 - 发布清单见 `store/checklist.md`；Edge 首次上架必须手动（API 只能更新已发布的商品），之后更新走上述流程。
-- **v2.2.0 真实发布尝试（2026-11-14）**：Release + workflow 全链路跑通至 Edge API，首次 **HTTP 401**（API key 过期，用户已更新）；复测 **HTTP 403 `Client ID is Invalid`**（原因短语现在会打印在日志里）。`EDGE_API_KEY` 已确诊有效，问题收敛到 `X-ClientID`：最常见原因是贴了 Product ID（两者都是 GUID）或 v1 时代的旧 OAuth client id；微软侧同样有 Service-side 报错记录（MicrosoftDocs/edge-developer#3905，2026-08，fresh v1.1 凭据同报 403 Client ID is Invalid，已转 microsoft/MicrosoftEdge-Extensions）。修复后 `gh workflow run release-edge.yml --ref master -f dry_run=false` 重试即可（zip 已附在 v2.2.0 Release 上；dry-run 已验证流水线其余环节全绿）。
+- **v2.2.0 发布（2026-11-14，已提交 Edge 审核）**：Release + workflow 全链路跑通至 Edge API。踩坑记录：(1) **HTTP 401** = API key 过期（用户已重新生成）；(2) **HTTP 403 `Client ID is Invalid`** = Client ID 贴错（2026-08 微软侧也有同名 service-side bug，edge-developer#3905）；(3) 轮询接口实际返回 **HTTP 202 + 操作 JSON**（不是文档里的 200）——`scripts/edge-publish.cjs` 已同时接受 200/202 且打印原因短语；(4) `gh run rerun` 复跑的 workflow 用的是**触发 commit 上的旧脚本**，改进后的脚本需用 `gh workflow run release-edge.yml --ref master -f dry_run=false` 才能带上。最终 upload/publish 两个操作均 Succeeded（dispatch run 43608953297），zip 附在 v2.2.0 Release。
 
 ## 商品详情页高清图下载（M3，2026-11-14 实测）
 
