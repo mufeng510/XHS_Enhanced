@@ -60,7 +60,7 @@ let libraryHydrated = false;
 let thresholdCache = DEFAULT_THRESHOLD;
 let focusCache = false;
 let batchScopeCache = 'all';
-let batchLayoutCache = 'notes';
+let batchLayoutCache = 'flat';
 
 function parseThresholdSafe(value) {
   if (value == null) return DEFAULT_THRESHOLD;
@@ -393,11 +393,11 @@ export function writeStoredBatchScope(value) {
 // packaging time; written on the options page (批量下载组织方式).
 export function readStoredBatchLayout(storage) {
   if (storage !== undefined) {
-    if (!storage) return 'notes';
+    if (!storage) return 'flat';
     try {
       return normalizeBatchLayout(storage.getItem(BATCH_LAYOUT_KEY));
     } catch (_) {
-      return 'notes';
+      return 'flat';
     }
   }
   return batchLayoutCache;

@@ -56,7 +56,7 @@ npm run package                # 产出 dist/xhs-enhanced-extension-v<manifest �
 - **产物**：单个 zip（内建手写 stored-zip+CRC32 纯函数 `src/lib/zip.js`，零依赖；>200MB 自动按 200MB 分卷 `_partK`）。`XHS笔记_YYYYMMDD_HHmm_<N>篇.zip`，内含 `<001>_<noteId>_<标题截断30>/01_封面.jpg, 02.jpg…`。锚点 object URL 直下（单手势单文件，不受多文件拦截），未加 downloads 权限。
 - **瀑布流**：SelectionStore（Map<noteId> + `chrome.storage.session` 持久化，`src/lib/selection.js`，键 `xhs-enhanced:batch-selected`）；新卡由 renderCard → renderCardChrome 自动补框/回显选中态。「连续勾选」开关打开时新卡自动入选（状态不持久化）。
 - **scope 三态**存 `chrome.storage.local`（`xhs-enhanced:batch-scope`，PREF_KEYS 一并 hydrate/迁移）。两标签页之间不同步（设计如此，KISS）。
-- **组织方式**（选项页「批量下载」卡，`xhs-enhanced:batch-layout`，同样 PREF_KEYS 路径）：`notes`=按笔记建文件夹（默认），`flat`=全部图片平铺单层（`<序号>_<笔记id>_<文件名>`，序号保持下载顺序、noteId 保唯一，无子文件夹）。运行时 `storage.onChanged` 合并进同步缓存，已打开的 feed 页即时生效；打包在 `onBatchDownload` 最后统一定名（`buildFlatEntryName`，见 zip.js）。
+- **组织方式**（选项页「批量下载」卡，`xhs-enhanced:batch-layout`，同样 PREF_KEYS 路径）：`flat`=全部图片平铺单层（`<序号>_<笔记id>_<文件名>`，序号保持下载顺序、noteId 保唯一，无子文件夹）**（默认，2026-11-17 起）**，`notes`=按笔记建文件夹。运行时 `storage.onChanged` 合并进同步缓存，已打开的 feed 页即时生效；打包在 `onBatchDownload` 最后统一定名（`buildFlatEntryName`，见 zip.js）。
 - **实测（Chrome 登录态）**：30 篇封面 → `XHS笔记_....zip` 11MB、全部有效 JPEG；2 篇笔记（1 单图卡 + 12 图 comic）scope=all → 13 个条目全部有效 JPEG 且结构正确；scope=inner → 仅 11 张内图（01..11）且单图笔记自动跳过。**组织方式配置项未在线上验证（用户选择跳过真机），仅 harness+单测覆盖**。
 - **harness mock 增加 `responseType:'text'` 分支**（详情 HTML 夹具，卡面定位 note-detail fixture 逻辑）。测试时序无关。
 - **_metadata**：Chrome 加载扩展会在 `extension/_metadata/` 写运行时缓存（已验证 check 前会失败但恢复后正常）；已被 .gitignore 覆盖，发布前务必删（static-check 会再断言）。
@@ -70,6 +70,7 @@ npm run package                # 产出 dist/xhs-enhanced-extension-v<manifest �
 - **__INITIAL_STATE__**：isolated world 不可见，从内联 `<script>` 文本 JSON.parse（balanced scan，`undefined`→null 降级），失败回退脚本文本正则。
 - **chrome.storage 跨上下文**：content script 启动时 `ready` 一次性 hydrate 出同步缓存；`chrome.storage.onChanged` 实时合并（选项页写入后所有已打开页面即时生效）。content script 还有一层 `subscribePreferenceChanges`：THRESHOLD/FOCUS 键变化时直接 `scan()` 重渲染（实测：选项页改阈值、所有已打开页面立即重算高亮/虚化）。
 - **阈值/只显示热门**：存在 `chrome.storage.local`（THRESHOLD_KEY / FOCUS_KEY），options 页可见可写，页面没有阈值浮层；按钮只剩 `⚙ 设置`（`xhs-enhanced-settings`）打开 options 页。legacy localStorage 旧键首启自动迁移。
+- **options 页偏好即时保存（2026-11-17 修复）**：增强设置（阈值）与批量下载（组织方式）两个卡片的控件 `change` 事件直接落盘（`#popular-threshold`/`#batch-layout-*`），不再依赖“内容库连接”卡里的“保存设置”按钮——此前没有 change 监听器，切换后不落盘、下次打开页面回到默认值，且 hint 文案说了“立即生效”却做不持久化，用户报告“改了设置又变回默认”。两卡现在各自有 `.status` 即时回执；内容库“保存设置”按钮写同样的键（幂等）。
 - **SPA 路由**：isolated world 无法 hook 页面 `history.pushState`；依赖（a）MutationObserver 内容根、（b）flush() 里 `location.href` 对比、（c）popstate/hashchange/visibilitychange。增删/替换 DOM 后必须 schedule 才检测。
 - **后台标签页的 rAF 被暂停**：headless/隐藏 tab 中 rAF 不触发，flush 永远等不到回调 → `schedule()` 对 `visibilityState === 'hidden'` 额外挂 `setTimeout(run, 150)` 兜底（visible tab 保持纯 rAF，harness 的 mock-rAF 计数不变）。
 - **harness 的 navigate()**：在 `sandbox`（内容根）内 append+remove 一个 marker span 来模拟 SPA 导航；append 到 body 会落在 observer 根之外，永远不会触发 flush。chrome.storage mock 里带 `onChanged`（含 `removeListener`），content script 的 `subscribePreferenceChanges` 靠它做即时重渲染断言。

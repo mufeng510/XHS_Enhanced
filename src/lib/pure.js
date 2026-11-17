@@ -255,7 +255,7 @@ export function slimNoteDetail(note) {
 export const BATCH_LAYOUT_VALUES = Object.freeze(['notes', 'flat']);
 export function normalizeBatchLayout(value) {
   const text = String(value == null ? '' : value).trim().toLowerCase();
-  return text === 'flat' ? 'flat' : 'notes';
+  return text === 'notes' ? 'notes' : 'flat';
 }
 
 // Batch-download scope preference. 'all' is the safe default (cover + inner);

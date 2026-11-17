@@ -156,6 +156,19 @@ test('zip naming, entry naming, info text and mime extension mapping', () => {
   assert(info.includes('分区：主图 3 张，详情图 2 张'), 'info.txt carries section breakdown');
 });
 
+test('batch layout defaults to flat when unset; explicit notes round-trips', () => {
+  const api = load();
+  // Empty store (no BATCH_LAYOUT_KEY) -> default flat.
+  assert.equal(api.readStoredBatchLayout({ getItem: () => null }), 'flat');
+  // Unreadable storage -> default flat.
+  assert.equal(api.readStoredBatchLayout({ getItem() { throw new Error('blocked'); } }), 'flat');
+  // Explicit values round-trip.
+  assert.equal(api.readStoredBatchLayout({ getItem: () => 'notes' }), 'notes');
+  assert.equal(api.readStoredBatchLayout({ getItem: () => 'flat' }), 'flat');
+  // Junk degrades to the flat default rather than notes.
+  assert.equal(api.readStoredBatchLayout({ getItem: () => 'nonsense' }), 'flat');
+});
+
 test('goods title parser strips the 小红书 suffix/prefix', () => {
   const api = load();
   assert.equal(api.getGoodsTitleFromDocument({ title: '某品牌保温杯 - 小红书' }), '某品牌保温杯');

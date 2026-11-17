@@ -1815,7 +1815,7 @@ let preferenceChangeHandler = null;
     buildDetailNoteUrl, resolveSaveUrlFromCard, cardNoteTargetId, resolveCardNoteLink,
     extractCardTitle, snapshotFromCard, onBatchDownload, mapWithConcurrency,
     buildZip, splitZipEntries, buildBatchZipFileName, buildNoteFolderName, buildImageFileName,
-    buildFlatEntryName,
+    buildFlatEntryName, readStoredBatchLayout,
     crc32, sanitizeFileName, createSelectionStore, SELECTION_STORAGE_KEY, normalizeBatchScope, normalizeBatchLayout,
     READ_ATTRIBUTES, SELECTORS
   });

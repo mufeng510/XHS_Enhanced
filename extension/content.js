@@ -241,7 +241,7 @@
   var BATCH_LAYOUT_VALUES = Object.freeze(["notes", "flat"]);
   function normalizeBatchLayout(value) {
     const text = String(value == null ? "" : value).trim().toLowerCase();
-    return text === "flat" ? "flat" : "notes";
+    return text === "notes" ? "notes" : "flat";
   }
   var BATCH_SCOPE_VALUES = Object.freeze(["cover", "inner", "all"]);
   function normalizeBatchScope(value) {
@@ -498,7 +498,7 @@
   var thresholdCache = DEFAULT_THRESHOLD;
   var focusCache = false;
   var batchScopeCache = "all";
-  var batchLayoutCache = "notes";
+  var batchLayoutCache = "flat";
   function parseThresholdSafe(value) {
     if (value == null) return DEFAULT_THRESHOLD;
     const parsed = parseThreshold(String(value));
@@ -758,11 +758,11 @@
   }
   function readStoredBatchLayout(storage) {
     if (storage !== void 0) {
-      if (!storage) return "notes";
+      if (!storage) return "flat";
       try {
         return normalizeBatchLayout(storage.getItem(BATCH_LAYOUT_KEY));
       } catch (_) {
-        return "notes";
+        return "flat";
       }
     }
     return batchLayoutCache;
@@ -3929,6 +3929,7 @@
     buildNoteFolderName,
     buildImageFileName,
     buildFlatEntryName,
+    readStoredBatchLayout,
     crc32,
     sanitizeFileName,
     createSelectionStore,

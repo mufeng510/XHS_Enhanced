@@ -15,21 +15,23 @@
 
   <section class="card">
     <h2>增强设置</h2>
-    <p class="hint">这些设置保存在本机的扩展存储中。保存后立即对所有已打开的小红书页面生效（热门判定按严格大于）。</p>
+    <p class="hint">这些设置保存在本机的扩展存储中。修改后立即对所有已打开的小红书页面生效（热门判定按严格大于）。</p>
     <label class="field" for="popular-threshold">热门阈值</label>
     <input id="popular-threshold" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="100">
+    <p id="threshold-status" class="status" role="status" aria-live="polite"></p>
   </section>
 
   <section class="card">
     <h2>批量下载</h2>
-    <p class="hint">批量勾选后点“下载已选”时，zip 内图片的组织方式。选择后立即对所有已打开的小红书页面生效。</p>
+    <p class="hint">批量勾选后点“下载已选”时，zip 内图片的组织方式。<strong>默认平铺</strong>到同一个文件夹，选择后立即对所有已打开的小红书页面生效。</p>
     <fieldset class="radio-group">
       <legend>批量图片组织方式</legend>
-      <label class="radio-row"><input type="radio" name="batch-layout" id="batch-layout-notes" value="notes" checked>
-        <span><strong>按笔记建文件夹（默认）</strong><small>每篇笔记一个文件夹，内含 01_封面.jpg 和内图</small></span></label>
-      <label class="radio-row"><input type="radio" name="batch-layout" id="batch-layout-flat" value="flat">
-        <span><strong>平铺到同一个文件夹</strong><small>不按笔记分类，全部图片直接放入单层目录；文件名带序号与笔记 ID（形如 001_&lt;笔记id&gt;_01_封面.jpg），不会重名</small></span></label>
+      <label class="radio-row"><input type="radio" name="batch-layout" id="batch-layout-notes" value="notes">
+        <span><strong>按笔记建文件夹</strong><small>每篇笔记一个文件夹，内含 01_封面.jpg 和内图</small></span></label>
+      <label class="radio-row"><input type="radio" name="batch-layout" id="batch-layout-flat" value="flat" checked>
+        <span><strong>平铺到同一个文件夹（默认）</strong><small>不按笔记分类，全部图片直接放入单层目录；文件名带序号与笔记 ID（形如 001_&lt;笔记id&gt;_01_封面.jpg），不会重名</small></span></label>
     </fieldset>
+    <p id="layout-status" class="status" role="status" aria-live="polite"></p>
   </section>
 
   <section class="card">

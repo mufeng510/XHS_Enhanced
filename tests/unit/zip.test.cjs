@@ -159,14 +159,14 @@ test('selection store tolerates missing storage and corrupt payloads', async () 
   assert.equal(corrupt.add({ id: 'ok', ts: 1 }), true);
 });
 
-test('normalizeBatchLayout accepts only notes|flat and degrades to notes', () => {
+test('normalizeBatchLayout accepts only notes|flat and degrades to flat (default)', () => {
   assert.equal(api.normalizeBatchLayout('flat'), 'flat');
   assert.equal(api.normalizeBatchLayout('FLAT'), 'flat');
   assert.equal(api.normalizeBatchLayout('notes'), 'notes');
-  assert.equal(api.normalizeBatchLayout(''), 'notes');
-  assert.equal(api.normalizeBatchLayout('nonsense'), 'notes');
-  assert.equal(api.normalizeBatchLayout(undefined), 'notes');
-  assert.equal(api.normalizeBatchLayout(null), 'notes');
+  assert.equal(api.normalizeBatchLayout(''), 'flat');
+  assert.equal(api.normalizeBatchLayout('nonsense'), 'flat');
+  assert.equal(api.normalizeBatchLayout(undefined), 'flat');
+  assert.equal(api.normalizeBatchLayout(null), 'flat');
 });
 
 test('buildFlatEntryName keeps seq prefix, note id and zero folders', () => {

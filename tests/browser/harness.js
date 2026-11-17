@@ -502,7 +502,7 @@
     assert(names.every(name => name.indexOf('/') === -1), 'flat layout has no folders', JSON.stringify(names));
     api.clearTestSelection();
     api.setBatchLayout('notes');
-    assert(api.getBatchLayoutSnapshot() === 'notes', 'layout restored to default (notes)');
+    assert(api.getBatchLayoutSnapshot() === 'notes', 'explicit notes layout round-trips');
   }
 
   async function jumpNavigation() {

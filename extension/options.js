@@ -32,7 +32,7 @@
   var BATCH_LAYOUT_VALUES = Object.freeze(["notes", "flat"]);
   function normalizeBatchLayout(value) {
     const text = String(value == null ? "" : value).trim().toLowerCase();
-    return text === "flat" ? "flat" : "notes";
+    return text === "notes" ? "notes" : "flat";
   }
   var BATCH_SCOPE_VALUES = Object.freeze(["cover", "inner", "all"]);
   function normalizeBatchScope(value) {
@@ -83,7 +83,7 @@
   var thresholdCache = DEFAULT_THRESHOLD;
   var focusCache = false;
   var batchScopeCache = "all";
-  var batchLayoutCache = "notes";
+  var batchLayoutCache = "flat";
   function parseThresholdSafe(value) {
     if (value == null) return DEFAULT_THRESHOLD;
     const parsed = parseThreshold(String(value));
@@ -341,11 +341,11 @@
   }
   function readStoredBatchLayout(storage) {
     if (storage !== void 0) {
-      if (!storage) return "notes";
+      if (!storage) return "flat";
       try {
         return normalizeBatchLayout(storage.getItem(BATCH_LAYOUT_KEY));
       } catch (_) {
-        return "notes";
+        return "flat";
       }
     }
     return batchLayoutCache;
@@ -450,6 +450,8 @@
     status: document.getElementById("library-status"),
     httpWarning: document.getElementById("library-http-warning"),
     threshold: document.getElementById("popular-threshold"),
+    thresholdStatus: document.getElementById("threshold-status"),
+    layoutStatus: document.getElementById("layout-status"),
     layoutNotes: document.getElementById("batch-layout-notes"),
     layoutFlat: document.getElementById("batch-layout-flat")
   };
@@ -486,6 +488,31 @@
     } catch (_) {
       return false;
     }
+  }
+  function setPrefStatus(node, message, isError) {
+    if (!node) return;
+    node.textContent = message || "";
+    if (isError) node.setAttribute("data-error", "true");
+    else node.removeAttribute("data-error");
+  }
+  function onThresholdChange() {
+    const raw = normalizeSpace(els.threshold ? els.threshold.value : "");
+    const parsed = parseThreshold(raw);
+    if (!parsed.ok) {
+      setPrefStatus(els.thresholdStatus, "\u70ED\u95E8\u9608\u503C\u9700\u4E3A\u975E\u8D1F\u6574\u6570\uFF08\u4F8B\u5982 100\uFF09\uFF0C\u672A\u4FDD\u5B58", true);
+      return;
+    }
+    const persisted = writeStoredThreshold(parsed.value).persisted;
+    setPrefStatus(els.thresholdStatus, persisted ? "\u5DF2\u4FDD\u5B58\uFF0C\u6240\u6709\u9875\u9762\u5373\u65F6\u751F\u6548" : "\u5DF2\u5E94\u7528\uFF0C\u4F46\u672A\u80FD\u6301\u4E45\u5316\uFF08\u5B58\u50A8\u4E0D\u53EF\u7528\uFF09", !persisted);
+  }
+  function onLayoutChange() {
+    const layout = els.layoutFlat && els.layoutFlat.checked ? "flat" : "notes";
+    const result = writeStoredBatchLayout(layout);
+    setPrefStatus(
+      els.layoutStatus,
+      result.persisted ? result.value === "flat" ? "\u5DF2\u4FDD\u5B58\uFF1A\u5E73\u94FA\u5230\u540C\u4E00\u4E2A\u6587\u4EF6\u5939\uFF0C\u6240\u6709\u9875\u9762\u5373\u65F6\u751F\u6548" : "\u5DF2\u4FDD\u5B58\uFF1A\u6309\u7B14\u8BB0\u5EFA\u6587\u4EF6\u5939\uFF0C\u6240\u6709\u9875\u9762\u5373\u65F6\u751F\u6548" : "\u5DF2\u5E94\u7528\uFF0C\u4F46\u672A\u80FD\u6301\u4E45\u5316\uFF08\u5B58\u50A8\u4E0D\u53EF\u7528\uFF09",
+      !result.persisted
+    );
   }
   function fillForm() {
     const cfg = readLibraryConfig();
@@ -650,4 +677,7 @@
       writeLibrarySettings({ baseUrl: form.base.value, username: form.username, accountId: form.accountId, password: form.password });
     });
   }
+  if (els.threshold) els.threshold.addEventListener("change", onThresholdChange);
+  if (els.layoutNotes) els.layoutNotes.addEventListener("change", onLayoutChange);
+  if (els.layoutFlat) els.layoutFlat.addEventListener("change", onLayoutChange);
 })();

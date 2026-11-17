@@ -188,3 +188,4 @@ footer {
   color: var(--muted);
   text-align: center;
 }
+.status[data-error="true"] { color: #c2402e; }

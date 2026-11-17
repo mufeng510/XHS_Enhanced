@@ -35,6 +35,8 @@ const els = {
   status: document.getElementById('library-status'),
   httpWarning: document.getElementById('library-http-warning'),
   threshold: document.getElementById('popular-threshold'),
+  thresholdStatus: document.getElementById('threshold-status'),
+  layoutStatus: document.getElementById('layout-status'),
   layoutNotes: document.getElementById('batch-layout-notes'),
   layoutFlat: document.getElementById('batch-layout-flat')
 };
@@ -77,6 +79,36 @@ async function ensureHostPermission(baseUrl) {
   } catch (_) {
     return false;
   }
+}
+
+function setPrefStatus(node, message, isError) {
+  if (!node) return;
+  node.textContent = message || '';
+  if (isError) node.setAttribute('data-error', 'true');
+  else node.removeAttribute('data-error');
+}
+
+function onThresholdChange() {
+  const raw = normalizeSpace(els.threshold ? els.threshold.value : '');
+  const parsed = parseThreshold(raw);
+  if (!parsed.ok) {
+    setPrefStatus(els.thresholdStatus, '热门阈值需为非负整数（例如 100），未保存', true);
+    return;
+  }
+  const persisted = writeStoredThreshold(parsed.value).persisted;
+  setPrefStatus(els.thresholdStatus, persisted ? '已保存，所有页面即时生效' : '已应用，但未能持久化（存储不可用）', !persisted);
+}
+
+function onLayoutChange() {
+  const layout = els.layoutFlat && els.layoutFlat.checked ? 'flat' : 'notes';
+  const result = writeStoredBatchLayout(layout);
+  setPrefStatus(
+    els.layoutStatus,
+    result.persisted
+      ? (result.value === 'flat' ? '已保存：平铺到同一个文件夹，所有页面即时生效' : '已保存：按笔记建文件夹，所有页面即时生效')
+      : '已应用，但未能持久化（存储不可用）',
+    !result.persisted
+  );
 }
 
 function fillForm() {
@@ -225,3 +257,8 @@ if (els.base && els.user && els.password && els.account && els.test && els.save 
     writeLibrarySettings({ baseUrl: form.base.value, username: form.username, accountId: form.accountId, password: form.password });
   });
 }
+// Preference cards save themselves immediately (hint text in each card says
+// so); the library "保存设置" button persists the same keys too (idempotent).
+if (els.threshold) els.threshold.addEventListener('change', onThresholdChange);
+if (els.layoutNotes) els.layoutNotes.addEventListener('change', onLayoutChange);
+if (els.layoutFlat) els.layoutFlat.addEventListener('change', onLayoutChange);
