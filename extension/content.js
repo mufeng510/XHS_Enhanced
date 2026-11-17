@@ -1646,6 +1646,30 @@
   var DECORATION_RE = /(avatar|emoji|favicon|logo|spacer|placeholder|1x1)/i;
   var TRAILING_JUNK_RE = /(?:[.,;:!?>)]+|&[a-z#0-9]+;)$/i;
   var URL_TEXT_RE = /https?:\/\/[^\s"'<>()\\]+/g;
+  var GOODS_SECTIONS = Object.freeze(["main", "detail", "other"]);
+  var GOODS_SECTION_LABELS = Object.freeze({ main: "\u4E3B\u56FE", detail: "\u8BE6\u60C5\u56FE", other: "\u5176\u5B83" });
+  var SECTION_DETAIL_SELECTOR = '[class*="graphic-detail"]';
+  var SECTION_MAIN_SELECTOR = '[class*="layout-swiper"], [class*="layout-slide"], [class*="swiper"], [class*="scroll-x"]';
+  var DOCUMENT_POSITION_FOLLOWING = 4;
+  function classifyGoodsSection(node, doc) {
+    if (!node || typeof node.closest !== "function") return "other";
+    if (node.closest(SECTION_DETAIL_SELECTOR)) return "detail";
+    const scope = doc || (node.ownerDocument || null);
+    const detailRoot = scope && typeof scope.querySelector === "function" ? scope.querySelector(SECTION_DETAIL_SELECTOR) : null;
+    const mainHit = node.closest(SECTION_MAIN_SELECTOR);
+    const beforeDetail = !detailRoot || typeof node.compareDocumentPosition !== "function" || Boolean(node.compareDocumentPosition(detailRoot) & DOCUMENT_POSITION_FOLLOWING);
+    if (mainHit) return beforeDetail ? "main" : "other";
+    return beforeDetail ? "main" : "other";
+  }
+  function countGoodsSections(entries) {
+    const counts = { main: 0, detail: 0, other: 0 };
+    for (const entry of entries || []) {
+      const section = entry && entry.section;
+      if (section === "main" || section === "detail") counts[section] += 1;
+      else counts.other += 1;
+    }
+    return counts;
+  }
   function isGoodsDetailRoute(href) {
     const text = String(href || "");
     if (!text) return false;
@@ -1745,24 +1769,40 @@
     }
     return order.map((key) => bestByKey.get(key));
   }
-  function collectGoodsImageCandidates(domCandidates, textCandidates, options) {
+  function normalizeGoodsSection(value) {
+    return value === "main" || value === "detail" ? value : "other";
+  }
+  function collectGoodsImageEntries(domEntries, textUrls, options) {
     const merged = [];
-    const seenAcrossLists = /* @__PURE__ */ new Set();
-    for (const url of domCandidates || []) {
+    for (const item of domEntries || []) {
+      const url = String(item && item.url || "").trim();
+      if (!url) continue;
+      merged.push({ url, section: normalizeGoodsSection(item.section) });
+    }
+    for (const url of textUrls || []) {
       const clean = String(url || "").trim();
       if (!clean) continue;
-      const key = "dom:" + canonicalGoodsImageKey(clean);
-      if (seenAcrossLists.has(key)) continue;
-      seenAcrossLists.add(key);
-      merged.push(clean);
+      merged.push({ url: clean, section: "other" });
     }
-    for (const url of textCandidates || []) {
-      const clean = String(url || "").trim();
-      if (!clean) continue;
-      merged.push(clean);
+    const filtered = merged.filter((item) => looksLikeGoodsImageUrl(item.url, options));
+    const bestByKey = /* @__PURE__ */ new Map();
+    const order = [];
+    for (const item of filtered) {
+      const key = canonicalGoodsImageKey(item.url);
+      const prev = bestByKey.get(key);
+      if (!prev) {
+        bestByKey.set(key, item);
+        order.push(key);
+        continue;
+      }
+      const mergedSection = prev.section === "other" && item.section !== "other" ? item.section : prev.section;
+      if (rankGoodsImageCandidate(item.url) > rankGoodsImageCandidate(prev.url)) {
+        bestByKey.set(key, { url: item.url, section: mergedSection });
+      } else if (mergedSection !== prev.section) {
+        bestByKey.set(key, { url: prev.url, section: mergedSection });
+      }
     }
-    const filtered = merged.filter((url) => looksLikeGoodsImageUrl(url, options));
-    return dedupeGoodsImages(filtered);
+    return order.map((key) => bestByKey.get(key));
   }
   var GOODS_FORMAT_MODES = Object.freeze([
     { value: "png", label: "\u9AD8\u6E05 PNG" },
@@ -1802,10 +1842,11 @@
     const base = `\u5C0F\u7EA2\u4E66\u5546\u54C1\u9AD8\u6E05\u56FE_${safeId}_${stamp}_${Number(count) || 0}\u5F20`;
     return partTotal > 1 ? `${base}_part${partIndex + 1}.zip` : `${base}.zip`;
   }
-  function buildGoodsImageFileName(index, ext) {
+  function buildGoodsImageFileName(index, ext, section) {
     const seq = String((Number(index) || 0) + 1).padStart(2, "0");
     const safeExt = String(ext || "png").replace(/[^a-z0-9]/gi, "").toLowerCase() || "png";
-    return `${seq}.${safeExt}`;
+    const prefix = section === "main" ? "\u4E3B\u56FE" : section === "detail" ? "\u8BE6\u60C5\u56FE" : section ? "\u5176\u5B83" : "";
+    return prefix ? `${prefix}_${seq}.${safeExt}` : `${seq}.${safeExt}`;
   }
   function buildGoodsInfoText(meta) {
     const m = meta || {};
@@ -1819,6 +1860,18 @@
       "\u9AD8\u6E05\u683C\u5F0F\uFF1A" + (GOODS_FORMAT_LABELS[m.mode] || m.mode || ""),
       "\u6765\u6E90\uFF1A\u5C0F\u7EA2\u4E66\u5546\u54C1\u8BE6\u60C5\u9875\uFF08\u7531\u201C\u5C0F\u7EA2\u4E66\u7F51\u9875\u7248\u589E\u5F3A\u201D\u6269\u5C55\u6279\u91CF\u5BFC\u51FA\uFF09"
     ];
+    const sections = m.sections && typeof m.sections === "object" ? m.sections : null;
+    if (sections) {
+      const parts = [];
+      for (const section of ["main", "detail", "other"]) {
+        const n = Number(sections[section]) || 0;
+        if (n > 0) parts.push(GOODS_SECTION_LABELS[section] + " " + n + " \u5F20");
+      }
+      if (parts.length) {
+        const at = lines.findIndex((line) => line.indexOf("\u56FE\u7247\u6570\u91CF\uFF1A") === 0);
+        lines.splice(at + 1, 0, "\u5206\u533A\uFF1A" + parts.join("\uFF0C"));
+      }
+    }
     return lines.join("\n") + "\n";
   }
   function getGoodsTitleFromDocument(documentRef) {
@@ -1843,8 +1896,8 @@
   var DECOR_ID = "xhs-enhanced-goods-decorations";
   var TITLE_TEXT = "\u{1F4F7} \u5546\u54C1\u9AD8\u6E05\u56FE\u4E0B\u8F7D";
   var COUNT_EMPTY = "\u672A\u626B\u63CF";
-  var COUNT_FOUND_PREFIX = "\u53D1\u73B0\u9AD8\u6E05\u56FE\u7247\uFF1A";
   var COUNT_NONE = "\u672A\u53D1\u73B0\u5C0F\u7EA2\u4E66\u5546\u54C1\u56FE\u7247";
+  var COUNT_FOUND_PREFIX = "\u53D1\u73B0\u9AD8\u6E05\u56FE\u7247\uFF1A";
   var panel = null;
   var countNode = null;
   var statusNode = null;
@@ -1879,9 +1932,17 @@
   function setStatus(message) {
     if (statusNode && statusNode.isConnected) statusNode.textContent = message || "";
   }
+  function formatSectionCounts(counts) {
+    const parts = [];
+    for (const section of ["main", "detail", "other"]) {
+      const n = counts[section] || 0;
+      if (n > 0) parts.push(GOODS_SECTION_LABELS[section] + " " + n);
+    }
+    return parts.join(" \xB7 ");
+  }
   function updateCountLabel() {
     if (!countNode || !countNode.isConnected) return;
-    countNode.textContent = currentImages.length ? COUNT_FOUND_PREFIX + currentImages.length + " \u5F20" : COUNT_NONE;
+    countNode.textContent = currentImages.length ? COUNT_FOUND_PREFIX + formatSectionCounts(countGoodsSections(currentImages)) + " \u5F20" : COUNT_NONE;
   }
   function setBusy(busy) {
     inFlight = busy;
@@ -1889,20 +1950,24 @@
     if (downloadButton) downloadButton.disabled = busy;
     if (downloadButton) downloadButton.textContent = busy ? "\u4E0B\u8F7D\u4E2D\u2026" : "\u4E0B\u8F7D\u9AD8\u6E05\u56FE";
   }
-  function collectDomCandidates(doc) {
+  function collectDomImageEntries(doc) {
     const out = [];
     if (!doc) return out;
     const imageNodes = Array.from(doc.querySelectorAll("img,source"));
     for (const node of imageNodes) {
-      if (node.currentSrc) out.push(node.currentSrc);
+      const section = classifyGoodsSection(node, doc);
+      const push = (url) => {
+        if (url) out.push({ url, section });
+      };
+      if (node.currentSrc) push(node.currentSrc);
       for (const attribute of ["src", "data-src", "data-original", "data-lazy-src", "data-actualsrc", "data-originalsrc"]) {
         const value = node.getAttribute && node.getAttribute(attribute);
-        if (value) out.push(value);
+        if (value) push(value);
       }
       const srcset = node.getAttribute ? node.getAttribute("srcset") || node.getAttribute("data-srcset") || node.getAttribute("data-original-srcset") || "" : "";
       if (srcset) {
         const largest = pickLargestFromSrcset(srcset);
-        if (largest) out.push(largest);
+        if (largest) push(largest);
       }
     }
     const styledNodes = doc.querySelectorAll ? Array.from(doc.querySelectorAll('[style*="background"]')) : [];
@@ -1910,15 +1975,15 @@
       const style = node.getAttribute && node.getAttribute("style");
       if (!style) continue;
       const match = String(style).match(/url\(\s*['"]?([^'")]+)['"]?\s*\)/i);
-      if (match && match[1]) out.push(match[1]);
+      if (match && match[1]) out.push({ url: match[1], section: classifyGoodsSection(node, doc) });
     }
     return out;
   }
   function computeImages(doc, options) {
-    const dom = collectDomCandidates(doc);
+    const dom = collectDomImageEntries(doc);
     const html = doc && doc.documentElement ? String(doc.documentElement.innerHTML || "") : "";
     const textUrls = extractUrlsFromText(html);
-    return collectGoodsImageCandidates(dom, textUrls, options);
+    return collectGoodsImageEntries(dom, textUrls, options);
   }
   function rescan(silent) {
     const doc = ROOT.document;
@@ -1975,7 +2040,9 @@
     let failed = 0;
     setBusy(true);
     setStatus("\u6B63\u5728\u4E0B\u8F7D 0/" + total + "\u2026");
-    mapWithConcurrencyLocal(images, 3, (url, index) => {
+    mapWithConcurrencyLocal(images, 3, (item, index) => {
+      const url = item.url || item;
+      const section = item.section || "other";
       const hd = toHDGoodsUrl(url, formatMode);
       return fetchBytes(hd, { timeout: 3e4 }).then((first) => {
         let res = first;
@@ -1983,37 +2050,45 @@
           if (hd !== url) {
             return fetchBytes(url, { timeout: 3e4 }).then((retry) => {
               done += 1;
-              res = retry;
               setStatus("\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + "\u2026");
-              return packEntry(url, retry, index);
+              return packEntry(url, retry, section);
             });
           }
           done += 1;
           setStatus("\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + "\u2026");
-          return packEntry(url, null, index);
+          return packEntry(url, null, section);
         }
         done += 1;
         setStatus("\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + "\u2026");
-        return packEntry(url, res, index);
+        return packEntry(url, res, section);
       });
     }).then((packed) => {
-      const entries = [];
+      const fetched = [];
       for (const item of packed) {
-        if (item && item.entry) entries.push(item.entry);
+        if (item && item.entry) fetched.push(item.entry);
         else failed += 1;
       }
-      if (!entries.length) {
+      if (!fetched.length) {
         setBusy(false);
         setStatus("\u5168\u90E8 " + total + " \u5F20\u56FE\u7247\u4E0B\u8F7D\u5931\u8D25");
         return;
       }
+      const sectionSeq = { main: 0, detail: 0, other: 0 };
+      const entries = fetched.map((entry) => {
+        const section = entry.section === "main" || entry.section === "detail" ? entry.section : "other";
+        const seq = sectionSeq[section] || 0;
+        sectionSeq[section] = seq + 1;
+        return { name: buildGoodsImageFileName(seq, entry.ext, section), bytes: entry.bytes };
+      });
+      const sectionCounts = countGoodsSections(fetched);
       const info = buildGoodsInfoText({
         pageUrl,
         goodsId,
         title,
         scannedAt,
         count: entries.length,
-        mode: formatMode
+        mode: formatMode,
+        sections: sectionCounts
       });
       entries.unshift({ name: "00_\u5546\u54C1\u4FE1\u606F.txt", bytes: utf8Bytes(info) });
       setStatus("\u6B63\u5728\u6253\u5305 " + entries.length + " \u4E2A\u6587\u4EF6\u2026");
@@ -2037,11 +2112,11 @@
       setStatus("\u4E0B\u8F7D\u5931\u8D25");
     });
   }
-  function packEntry(url, res, index) {
+  function packEntry(url, res, section) {
     const bytes = res && res.ok && res.bytes && res.bytes.length ? res.bytes : null;
     if (!bytes) return { entry: null };
     const ext = extForImage(bytes, res.contentType, url);
-    return { entry: { name: buildGoodsImageFileName(index, ext), bytes } };
+    return { entry: { name: "", bytes, ext, section } };
   }
   function onDecorationsToggle() {
     includeDecorations = Boolean(decorToggle && decorToggle.checked);
@@ -3815,7 +3890,11 @@
     canonicalGoodsImageKey,
     rankGoodsImageCandidate,
     dedupeGoodsImages,
-    collectGoodsImageCandidates,
+    collectGoodsImageEntries,
+    classifyGoodsSection,
+    countGoodsSections,
+    normalizeGoodsSection,
+    GOODS_SECTION_LABELS,
     toHDGoodsUrl,
     extensionForMime,
     buildGoodsZipFileName,

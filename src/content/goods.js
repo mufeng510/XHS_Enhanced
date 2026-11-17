@@ -11,7 +11,10 @@ import {
   getGoodsIdFromHref,
   extractUrlsFromText,
   looksLikeGoodsImageUrl,
-  collectGoodsImageCandidates,
+  collectGoodsImageEntries,
+  classifyGoodsSection,
+  countGoodsSections,
+  GOODS_SECTION_LABELS,
   toHDGoodsUrl,
   buildGoodsZipFileName,
   buildGoodsImageFileName,
@@ -36,8 +39,8 @@ const FORMAT_ID = 'xhs-enhanced-goods-format';
 const DECOR_ID = 'xhs-enhanced-goods-decorations';
 const TITLE_TEXT = '📷 商品高清图下载';
 const COUNT_EMPTY = '未扫描';
-const COUNT_FOUND_PREFIX = '发现高清图片：';
 const COUNT_NONE = '未发现小红书商品图片';
+const COUNT_FOUND_PREFIX = '发现高清图片：';
 
 let panel = null;
 let countNode = null;
@@ -73,10 +76,19 @@ function setStatus(message) {
   if (statusNode && statusNode.isConnected) statusNode.textContent = message || '';
 }
 
+function formatSectionCounts(counts) {
+  const parts = [];
+  for (const section of ['main', 'detail', 'other']) {
+    const n = counts[section] || 0;
+    if (n > 0) parts.push(GOODS_SECTION_LABELS[section] + ' ' + n);
+  }
+  return parts.join(' · ');
+}
+
 function updateCountLabel() {
   if (!countNode || !countNode.isConnected) return;
   countNode.textContent = currentImages.length
-    ? COUNT_FOUND_PREFIX + currentImages.length + ' 张'
+    ? COUNT_FOUND_PREFIX + formatSectionCounts(countGoodsSections(currentImages)) + ' 张'
     : COUNT_NONE;
 }
 
@@ -88,24 +100,26 @@ function setBusy(busy) {
 }
 
 // DOM-side candidates: rendered <img>/<source> nodes (currentSrc/src/data-*,
-// srcset) plus inline background-image URLs. HTML-text scanning happens in
-// computeImages() on top of this.
-function collectDomCandidates(doc) {
+// srcset) plus inline background-image URLs. Each candidate keeps its section
+// (main/detail/other) based on the container it lives in.
+function collectDomImageEntries(doc) {
   const out = [];
   if (!doc) return out;
   const imageNodes = Array.from(doc.querySelectorAll('img,source'));
   for (const node of imageNodes) {
-    if (node.currentSrc) out.push(node.currentSrc);
+    const section = classifyGoodsSection(node, doc);
+    const push = url => { if (url) out.push({ url, section }); };
+    if (node.currentSrc) push(node.currentSrc);
     for (const attribute of ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-actualsrc', 'data-originalsrc']) {
       const value = node.getAttribute && node.getAttribute(attribute);
-      if (value) out.push(value);
+      if (value) push(value);
     }
     const srcset = node.getAttribute
       ? (node.getAttribute('srcset') || node.getAttribute('data-srcset') || node.getAttribute('data-original-srcset') || '')
       : '';
     if (srcset) {
       const largest = pickLargestFromSrcset(srcset);
-      if (largest) out.push(largest);
+      if (largest) push(largest);
     }
   }
   const styledNodes = doc.querySelectorAll ? Array.from(doc.querySelectorAll('[style*="background"]')) : [];
@@ -113,16 +127,16 @@ function collectDomCandidates(doc) {
     const style = node.getAttribute && node.getAttribute('style');
     if (!style) continue;
     const match = String(style).match(/url\(\s*['"]?([^'")]+)['"]?\s*\)/i);
-    if (match && match[1]) out.push(match[1]);
+    if (match && match[1]) out.push({ url: match[1], section: classifyGoodsSection(node, doc) });
   }
   return out;
 }
 
 function computeImages(doc, options) {
-  const dom = collectDomCandidates(doc);
+  const dom = collectDomImageEntries(doc);
   const html = doc && doc.documentElement ? String(doc.documentElement.innerHTML || '') : '';
   const textUrls = extractUrlsFromText(html);
-  return collectGoodsImageCandidates(dom, textUrls, options);
+  return collectGoodsImageEntries(dom, textUrls, options);
 }
 
 function rescan(silent) {
@@ -183,7 +197,9 @@ function onDownload() {
   let failed = 0;
   setBusy(true);
   setStatus('正在下载 0/' + total + '…');
-  mapWithConcurrencyLocal(images, 3, (url, index) => {
+  mapWithConcurrencyLocal(images, 3, (item, index) => {
+    const url = item.url || item;
+    const section = item.section || 'other';
     const hd = toHDGoodsUrl(url, formatMode);
     return fetchBytes(hd, { timeout: 30000 }).then(first => {
       let res = first;
@@ -191,32 +207,40 @@ function onDownload() {
         if (hd !== url) {
           return fetchBytes(url, { timeout: 30000 }).then(retry => {
             done += 1;
-            res = retry;
             setStatus('正在下载 ' + done + '/' + total + '…');
-            return packEntry(url, retry, index);
+            return packEntry(url, retry, section);
           });
         }
         done += 1;
         setStatus('正在下载 ' + done + '/' + total + '…');
-        return packEntry(url, null, index);
+        return packEntry(url, null, section);
       }
       done += 1;
       setStatus('正在下载 ' + done + '/' + total + '…');
-      return packEntry(url, res, index);
+      return packEntry(url, res, section);
     });
   }).then(packed => {
-    const entries = [];
+    const fetched = [];
     for (const item of packed) {
-      if (item && item.entry) entries.push(item.entry);
+      if (item && item.entry) fetched.push(item.entry);
       else failed += 1;
     }
-    if (!entries.length) {
+    if (!fetched.length) {
       setBusy(false);
       setStatus('全部 ' + total + ' 张图片下载失败');
       return;
     }
+    // Per-section numbering: 主图_01.., 详情图_01.., 其它_01...
+    const sectionSeq = { main: 0, detail: 0, other: 0 };
+    const entries = fetched.map(entry => {
+      const section = entry.section === 'main' || entry.section === 'detail' ? entry.section : 'other';
+      const seq = sectionSeq[section] || 0;
+      sectionSeq[section] = seq + 1;
+      return { name: buildGoodsImageFileName(seq, entry.ext, section), bytes: entry.bytes };
+    });
+    const sectionCounts = countGoodsSections(fetched);
     const info = buildGoodsInfoText({
-      pageUrl, goodsId, title, scannedAt, count: entries.length, mode: formatMode
+      pageUrl, goodsId, title, scannedAt, count: entries.length, mode: formatMode, sections: sectionCounts
     });
     entries.unshift({ name: '00_商品信息.txt', bytes: utf8Bytes(info) });
     setStatus('正在打包 ' + entries.length + ' 个文件…');
@@ -241,11 +265,11 @@ function onDownload() {
   });
 }
 
-function packEntry(url, res, index) {
+function packEntry(url, res, section) {
   const bytes = res && res.ok && res.bytes && res.bytes.length ? res.bytes : null;
   if (!bytes) return { entry: null };
   const ext = extForImage(bytes, res.contentType, url);
-  return { entry: { name: buildGoodsImageFileName(index, ext), bytes } };
+  return { entry: { name: '', bytes, ext, section } };
 }
 
 function onDecorationsToggle() {

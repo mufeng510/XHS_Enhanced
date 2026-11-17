@@ -98,15 +98,37 @@ test('toHDGoodsUrl rewrites query per mode and survives junk input', () => {
   assert.equal(api.toHDGoodsUrl('', 'png'), '');
 });
 
-test('collectGoodsImageCandidates merges dom+text, filters and dedupes', () => {
+test('collectGoodsImageEntries merges dom+text, filters, dedupes and keeps sections', () => {
   const api = load();
-  const dom = [IMG_B, 'https://fe-static.xhscdn.com/formula-static/goods-detail/public/css/allStyle.css'];
+  const dom = [
+    { url: IMG_B, section: 'main' },
+    { url: 'https://fe-static.xhscdn.com/formula-static/goods-detail/public/css/allStyle.css', section: 'main' }
+  ];
   const text = [IMG_A, IMG_B, 'https://sns-avatar-qc.xhscdn.com/avatar/1040g2AAA000000000000000000000000000000004'];
-  const out = api.collectGoodsImageCandidates(dom, text, {});
+  const out = api.collectGoodsImageEntries(dom, text, {});
   assert.equal(out.length, 2, 'css and avatar dropped, duplicate base collapsed');
-  assert(out.includes(IMG_A));
-  const withDecor = api.collectGoodsImageCandidates(dom, text, { includeDecorations: true });
+  const a = out.find(e => e.url === IMG_A);
+  const b = out.find(e => e.url === IMG_B);
+  assert(a && a.section === 'other', 'text-scanned url defaults to other section');
+  assert(b && b.section === 'main', 'dom section preserved for the winning candidate');
+  const withDecor = api.collectGoodsImageEntries(dom, text, { includeDecorations: true });
   assert.equal(withDecor.length, 3, 'avatar kept when decorations are included');
+  // other → known section upgrade on merge
+  const upgraded = api.collectGoodsImageEntries([{ url: IMG_A, section: 'detail' }], [IMG_A], {});
+  assert.equal(upgraded[0].section, 'detail', 'other section upgrades to a known section');
+  // classify by container class names (fake nodes: real DOM covered by harness)
+  assert.equal(api.classifyGoodsSection(null), 'other');
+  const fakeNode = (closestMap, doc) => ({ closest: sel => closestMap[sel] || null, compareDocumentPosition: () => 0, ownerDocument: doc });
+  assert.equal(api.classifyGoodsSection(fakeNode({ '[class*="graphic-detail"]': {} })), 'detail');
+  assert.equal(api.classifyGoodsSection(fakeNode({ '[class*="layout-swiper"], [class*="layout-slide"], [class*="swiper"], [class*="scroll-x"]': {} })), 'main');
+  assert.equal(api.classifyGoodsSection(fakeNode({})), 'main', 'page without the graphic-detail boundary falls back to main');
+  const counts = api.countGoodsSections([{ section: 'main' }, { section: 'main' }, { section: 'detail' }, { section: 'other' }, {}]);
+  assert.equal(counts.main, 2);
+  assert.equal(counts.detail, 1);
+  assert.equal(counts.other, 2);
+  assert.equal(api.normalizeGoodsSection('detail'), 'detail');
+  assert.equal(api.normalizeGoodsSection('junk'), 'other');
+  assert.deepEqual(api.GOODS_SECTION_LABELS.main, '主图');
 });
 
 test('zip naming, entry naming, info text and mime extension mapping', () => {
@@ -120,13 +142,18 @@ test('zip naming, entry naming, info text and mime extension mapping', () => {
   assert.equal(api.buildGoodsImageFileName(0, 'PNG'), '01.png');
   assert.equal(api.buildGoodsImageFileName(11, '.jpeg!'), '12.jpeg');
   assert.equal(api.buildGoodsImageFileName(2, '***'), '03.png');
+  assert.equal(api.buildGoodsImageFileName(0, 'png', 'main'), '主图_01.png');
+  assert.equal(api.buildGoodsImageFileName(3, 'webp', 'detail'), '详情图_04.webp');
+  assert.equal(api.buildGoodsImageFileName(1, 'png', 'other'), '其它_02.png');
+  assert.equal(api.buildGoodsImageFileName(0, 'png', 'bogus'), '其它_01.png');
   assert.equal(api.extensionForMime('image/jpeg'), 'jpg');
   assert.equal(api.extensionForMime('IMAGE/PNG'), 'png');
   assert.equal(api.extensionForMime('image/webp; charset=binary'), 'webp');
   assert.equal(api.extensionForMime(''), 'png');
   assert.equal(api.extensionForMime('', 'jpg'), 'jpg');
-  const info = api.buildGoodsInfoText({ pageUrl: 'https://www.xiaohongshu.com/goods-detail/abc', goodsId: 'abc', title: '某商品', scannedAt: '2026/11/14 15:30', count: 5, mode: 'png' });
+  const info = api.buildGoodsInfoText({ pageUrl: 'https://www.xiaohongshu.com/goods-detail/abc', goodsId: 'abc', title: '某商品', scannedAt: '2026/11/14 15:30', count: 5, mode: 'png', sections: { main: 3, detail: 2, other: 0 } });
   assert(info.includes('某商品') && info.includes('https://www.xiaohongshu.com/goods-detail/abc') && info.includes('图片数量：5') && info.includes('高清 PNG'), 'info.txt carries product metadata');
+  assert(info.includes('分区：主图 3 张，详情图 2 张'), 'info.txt carries section breakdown');
 });
 
 test('goods title parser strips the 小红书 suffix/prefix', () => {

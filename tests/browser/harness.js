@@ -733,34 +733,46 @@
     assert(document.getElementById('xhs-enhanced-goods-scan') && document.getElementById('xhs-enhanced-goods-download'), 'goods panel exposes scan and download buttons');
     assert(document.querySelectorAll('#xhs-enhanced-goods-format option').length === 3, 'goods format selector offers png/original/jpeg');
     // Product-gallery-like images plus a static JS asset and an avatar that
-    // must be filtered out by the default scan.
+    // must be filtered out by the default scan. The gallery image sits in a
+    // swiper container (→ 主图), the detail image in the graphic-detail
+    // container (→ 详情图).
     sandbox.replaceChildren();
+    const swiper = document.createElement('div');
+    swiper.className = 'layout-swiper';
     const productImg = document.createElement('img');
     productImg.setAttribute('src', 'https://sns-webpic-qc.xhscdn.com/base1/1040g2goods0000000000000000000000000001!nd_dft_wlteh_webp_3');
-    const galleryImg = document.createElement('img');
-    galleryImg.setAttribute('src', 'https://fe-img-qc.xhscdn.com/base2/1040g2goods0000000000000000000000000002?imageView2/2/w/540/format/webp');
+    swiper.appendChild(productImg);
+    const detailContainer = document.createElement('div');
+    detailContainer.className = 'graphic-detail-container';
+    const detailImg = document.createElement('img');
+    detailImg.setAttribute('src', 'https://fe-img-qc.xhscdn.com/base2/1040g2goods0000000000000000000000000002?imageView2/2/w/1080/format/webp');
+    detailContainer.appendChild(detailImg);
     const staticAsset = document.createElement('img');
     staticAsset.setAttribute('src', 'https://fe-static.xhscdn.com/formula-static/goods-detail/public/js/main.d4927ba.js');
     const avatarImg = document.createElement('img');
     avatarImg.setAttribute('src', 'https://sns-avatar-qc.xhscdn.com/avatar/1040g2goods0000000000000000000000000003');
-    sandbox.append(productImg, galleryImg, staticAsset, avatarImg);
+    sandbox.append(swiper, detailContainer, staticAsset, avatarImg);
     document.getElementById('xhs-enhanced-goods-scan').click();
     await checkpoint();
     const snapshot = api.getGoodsImagesSnapshot();
-    assert(snapshot.some(u => u.includes('base1/1040g2goods0000000000000000000000000001')), 'scan captures product gallery image');
-    assert(snapshot.some(u => u.includes('base2/1040g2goods0000000000000000000000000002')), 'scan captures gallery image with imageView2 query');
-    assert(!snapshot.some(u => /\.js($|\?|!)/.test(u)), 'scan rejects static JS assets on the CDN');
-    assert(!snapshot.some(u => /avatar/i.test(u)), 'scan excludes decorative avatars by default');
+    const productEntry = snapshot.find(u => u.url.includes('base1/1040g2goods0000000000000000000000000001'));
+    const detailEntry = snapshot.find(u => u.url.includes('base2/1040g2goods0000000000000000000000000002'));
+    assert(productEntry && productEntry.section === 'main', 'scan captures swiper image as 主图');
+    assert(detailEntry && detailEntry.section === 'detail', 'scan captures graphic-detail image as 详情图');
+    assert(!snapshot.some(u => /\.js($|\?|!)/.test(u.url)), 'scan rejects static JS assets on the CDN');
+    assert(!snapshot.some(u => /avatar/i.test(u.url)), 'scan excludes decorative avatars by default');
+    const countText = document.getElementById('xhs-enhanced-goods-count').textContent;
+    assert(countText.includes('主图') && countText.includes('详情图'), 'count label shows section breakdown', countText);
     // Opt-in: decorative images can be included.
     const decor = document.getElementById('xhs-enhanced-goods-decorations');
     decor.checked = true;
     decor.dispatchEvent(new Event('change'));
     await checkpoint();
-    assert(api.getGoodsImagesSnapshot().some(u => /avatar/i.test(u)), 'decorations toggle includes avatars');
+    assert(api.getGoodsImagesSnapshot().some(u => /avatar/i.test(u.url)), 'decorations toggle includes avatars');
     decor.checked = false;
     decor.dispatchEvent(new Event('change'));
     await checkpoint();
-    assert(!api.getGoodsImagesSnapshot().some(u => /avatar/i.test(u)), 'decorations toggle restores filtering');
+    assert(!api.getGoodsImagesSnapshot().some(u => /avatar/i.test(u.url)), 'decorations toggle restores filtering');
     // Format switch must not break the panel or the scan.
     const format = document.getElementById('xhs-enhanced-goods-format');
     format.value = 'jpeg';

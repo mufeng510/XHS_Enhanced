@@ -24,6 +24,41 @@ const DECORATION_RE = /(avatar|emoji|favicon|logo|spacer|placeholder|1x1)/i;
 const TRAILING_JUNK_RE = /(?:[.,;:!?>)]+|&[a-z#0-9]+;)$/i;
 const URL_TEXT_RE = /https?:\/\/[^\s"'<>()\\]+/g;
 
+// 图片分区：主图轮播（layout-swiper / layout-slide / swiper / scroll-x 等字面量
+// 类名）、图文详情（graphic-detail 字面量类名）、其余（推荐好物/种草笔记等，
+// 页面哈希类名，无法稳定归属）。用于 zip 内文件名区分：主图_01.png / 详情图_01.png / 其它_01.png。
+export const GOODS_SECTIONS = Object.freeze(['main', 'detail', 'other']);
+export const GOODS_SECTION_LABELS = Object.freeze({ main: '主图', detail: '详情图', other: '其它' });
+const SECTION_DETAIL_SELECTOR = '[class*="graphic-detail"]';
+const SECTION_MAIN_SELECTOR = '[class*="layout-swiper"], [class*="layout-slide"], [class*="swiper"], [class*="scroll-x"]';
+const DOCUMENT_POSITION_FOLLOWING = 4;
+
+// 分类规则：① 落在 graphic-detail 容器内 → detail；② 命中主图轮播类名且位于
+// graphic-detail 边界之前（或页面无边界标记）→ main，之后则说明是推荐区里的
+// 轮播，归入 other；③ 无类名命中时按边界兜底：边界之前 main，之后 other。
+export function classifyGoodsSection(node, doc) {
+  if (!node || typeof node.closest !== 'function') return 'other';
+  if (node.closest(SECTION_DETAIL_SELECTOR)) return 'detail';
+  const scope = doc || (node.ownerDocument || null);
+  const detailRoot = scope && typeof scope.querySelector === 'function' ? scope.querySelector(SECTION_DETAIL_SELECTOR) : null;
+  const mainHit = node.closest(SECTION_MAIN_SELECTOR);
+  const beforeDetail = !detailRoot
+    || typeof node.compareDocumentPosition !== 'function'
+    || Boolean(node.compareDocumentPosition(detailRoot) & DOCUMENT_POSITION_FOLLOWING);
+  if (mainHit) return beforeDetail ? 'main' : 'other';
+  return beforeDetail ? 'main' : 'other';
+}
+
+export function countGoodsSections(entries) {
+  const counts = { main: 0, detail: 0, other: 0 };
+  for (const entry of entries || []) {
+    const section = entry && entry.section;
+    if (section === 'main' || section === 'detail') counts[section] += 1;
+    else counts.other += 1;
+  }
+  return counts;
+}
+
 export function isGoodsDetailRoute(href) {
   const text = String(href || '');
   if (!text) return false;
@@ -141,26 +176,46 @@ export function dedupeGoodsImages(urls) {
   return order.map(key => bestByKey.get(key));
 }
 
-// Full pipeline: extract → filter → dedupe. Input is a mixed bag of DOM
-// candidates and text-scanned URLs.
-export function collectGoodsImageCandidates(domCandidates, textCandidates, options) {
+export function normalizeGoodsSection(value) {
+  return value === 'main' || value === 'detail' ? value : 'other';
+}
+
+// Full pipeline: extract → filter → dedupe. DOM-derived candidates carry a
+// section (main/detail/other); text-scanned URLs are section=other. The first
+// section seen wins for a canonical key; an 'other' section upgrades to a
+// known one when a better candidate arrives. URL quality still decides which
+// derivative is kept.
+export function collectGoodsImageEntries(domEntries, textUrls, options) {
   const merged = [];
-  const seenAcrossLists = new Set();
-  for (const url of domCandidates || []) {
+  for (const item of domEntries || []) {
+    const url = String((item && item.url) || '').trim();
+    if (!url) continue;
+    merged.push({ url, section: normalizeGoodsSection(item.section) });
+  }
+  for (const url of textUrls || []) {
     const clean = String(url || '').trim();
     if (!clean) continue;
-    const key = 'dom:' + canonicalGoodsImageKey(clean);
-    if (seenAcrossLists.has(key)) continue;
-    seenAcrossLists.add(key);
-    merged.push(clean);
+    merged.push({ url: clean, section: 'other' });
   }
-  for (const url of textCandidates || []) {
-    const clean = String(url || '').trim();
-    if (!clean) continue;
-    merged.push(clean);
+  const filtered = merged.filter(item => looksLikeGoodsImageUrl(item.url, options));
+  const bestByKey = new Map();
+  const order = [];
+  for (const item of filtered) {
+    const key = canonicalGoodsImageKey(item.url);
+    const prev = bestByKey.get(key);
+    if (!prev) {
+      bestByKey.set(key, item);
+      order.push(key);
+      continue;
+    }
+    const mergedSection = prev.section === 'other' && item.section !== 'other' ? item.section : prev.section;
+    if (rankGoodsImageCandidate(item.url) > rankGoodsImageCandidate(prev.url)) {
+      bestByKey.set(key, { url: item.url, section: mergedSection });
+    } else if (mergedSection !== prev.section) {
+      bestByKey.set(key, { url: prev.url, section: mergedSection });
+    }
   }
-  const filtered = merged.filter(url => looksLikeGoodsImageUrl(url, options));
-  return dedupeGoodsImages(filtered);
+  return order.map(key => bestByKey.get(key));
 }
 
 export const GOODS_FORMAT_MODES = Object.freeze([
@@ -216,10 +271,11 @@ export function buildGoodsZipFileName(now, count, goodsId, partIndex = 0, partTo
   return partTotal > 1 ? `${base}_part${partIndex + 1}.zip` : `${base}.zip`;
 }
 
-export function buildGoodsImageFileName(index, ext) {
+export function buildGoodsImageFileName(index, ext, section) {
   const seq = String((Number(index) || 0) + 1).padStart(2, '0');
   const safeExt = String(ext || 'png').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'png';
-  return `${seq}.${safeExt}`;
+  const prefix = section === 'main' ? '主图' : section === 'detail' ? '详情图' : (section ? '其它' : '');
+  return prefix ? `${prefix}_${seq}.${safeExt}` : `${seq}.${safeExt}`;
 }
 
 // info.txt 随压缩包一起导出的商品元信息。
@@ -235,6 +291,18 @@ export function buildGoodsInfoText(meta) {
     '高清格式：' + (GOODS_FORMAT_LABELS[m.mode] || m.mode || ''),
     '来源：小红书商品详情页（由“小红书网页版增强”扩展批量导出）'
   ];
+  const sections = m.sections && typeof m.sections === 'object' ? m.sections : null;
+  if (sections) {
+    const parts = [];
+    for (const section of ['main', 'detail', 'other']) {
+      const n = Number(sections[section]) || 0;
+      if (n > 0) parts.push(GOODS_SECTION_LABELS[section] + ' ' + n + ' 张');
+    }
+    if (parts.length) {
+      const at = lines.findIndex(line => line.indexOf('图片数量：') === 0);
+      lines.splice(at + 1, 0, '分区：' + parts.join('，'));
+    }
+  }
   return lines.join('\n') + '\n';
 }
 

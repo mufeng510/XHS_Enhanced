@@ -40,7 +40,8 @@ npm run package                # 产出 dist/xhs-enhanced-extension-v<manifest �
 - **来源**：goods-detail 是纯 CSR（SSR 只有 `<div id="app">`，SW 直拉拿不到图），只能内容脚本现场扫描。扫描 = DOM（`img` currentSrc/src/data-*、srcset 最大候选、`<source>`、行内 `background-image`）+ 整页 `documentElement.innerHTML` 文本 URL 提取（处理 `\u002F` 转义、去掉尾随标点）。
 - **过滤**（`src/lib/goods.js`）：仅 XHS CDN 主机（xhscdn.com + ci/img/qimg.xiaohongshu.com）；排除 fe-static/formula-static（JS/CSS/字体）、含 avatar/emoji/logo 的修饰图（面板内可勾选「包含修饰图」解除）、按「host + 去 `!后缀`/query 的 path」去重，保留 imageView2 宽度最大者（无 w 参数视为 4096 最高级）。
 - **HD 转换**：默认 `?imageView2/2/format/png`（油猴原语义）；面板可切换「原始格式」（剥 query）/「JPEG q90」。
-- **产出**：单个 zip（stored + `00_商品信息.txt` 含标题/链接/ID/时间），单 zip 走 anchor object URL 直下（不加 downloads 权限）；>200MB 按 200MB 分卷；单张图走后台 `fetchBytes`（DNR Referer 规则只覆盖 xhscdn 与 ci.xiaohongshu.com，故 fe-img-qc.xhscdn.com 主路径 OK，img/qimg.xiaohongshu.com 已加入静态 GET/HEAD 门，见下条）。
+- **产出**：单个 zip（stored + `00_商品信息.txt` 含标题/链接/ID/时间/分区计数），单 zip 走 anchor object URL 直下（不加 downloads 权限）；>200MB 按 200MB 分卷；单张图走后台 `fetchBytes`（DNR Referer 规则只覆盖 xhscdn 与 ci.xiaohongshu.com，故 fe-img-qc.xhscdn.com 主路径 OK，img/qimg.xiaohongshu.com 已加入静态 GET/HEAD 门，见下条）。
+- **分区命名**（2026-11-17，2.4.0）：DOM 候选按位置分区，zip 内按分区编号命名——`主图_01.png`（`layout-swiper` / `layout-slide` / `swiper` / `scroll-x` 容器内且位于 graphic-detail 边界之前）/ `详情图_01.png`（`[class*="graphic-detail"]` 图文详情容器）/ `其它_01.png`（推荐好物/种草笔记等：位于边界之后、或无法归属、或来自 HTML 文本扫描）。每分区从 01 独立编号；分类仅依赖字面量类名（页面其余部分为 CSS-Module 哈希类名，无法稳定命中），边界标记 `graphic-detail` 缺失时全部按 main 处理；顺序取 DOM 文档序。
 - **生命周期**：`flush()` 里 `syncGoodsPanel(route)` 按路由创建/销毁（SPA 回退会移除面板）；面板内自带 MutationObserver（1.2s 去抖）跟随懒加载自动重扫，另有 800ms 首扫；Destroy 时断开 observer 并移除面板。
 - 与笔记功能互不干扰：goods-detail 路由 `isTargetRoute()` 为 false，笔记高亮/批量/入库全部不运行；面板样式复用 content.js 注入的全局 style。
 - 单测 `tests/unit/goods.test.cjs`（vm 加载 content.js 的 test seam 纯函数）；harness 增加 `goodsDetailDownload` 用例（面板渲染/扫描过滤/修饰图开关/下载完成/离开路由移除）。
