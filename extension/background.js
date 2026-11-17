@@ -170,6 +170,29 @@
       }
     }
   }
+  function openOptionsPageFromBackground() {
+    try {
+      const runtime = chrome.runtime;
+      if (runtime && typeof runtime.openOptionsPage === "function") {
+        runtime.openOptionsPage();
+        return;
+      }
+    } catch (_) {
+    }
+    try {
+      if (chrome.tabs && typeof chrome.tabs.create === "function" && chrome.runtime && typeof chrome.runtime.getURL === "function") {
+        chrome.tabs.create({ url: chrome.runtime.getURL("options.html") });
+      }
+    } catch (_) {
+    }
+  }
+  try {
+    const action = chrome.action;
+    if (action && action.onClicked && typeof action.onClicked.addListener === "function") {
+      action.onClicked.addListener(() => openOptionsPageFromBackground());
+    }
+  } catch (_) {
+  }
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message) return void 0;
     if (message.type === FETCH_MESSAGE) {

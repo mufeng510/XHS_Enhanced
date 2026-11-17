@@ -191,6 +191,38 @@ async function handleCollectNoteViaTab(request) {
   }
 }
 
+// Left-click on the toolbar icon opens the options page. The action declares
+// no default_popup, so chrome.action.onClicked fires instead. openOptionsPage
+// is the standard MV3 path; tabs.create(options.html) is a defensive fallback
+// on browsers where it is missing (no "tabs" permission is required either way).
+function openOptionsPageFromBackground() {
+  try {
+    const runtime = chrome.runtime;
+    if (runtime && typeof runtime.openOptionsPage === 'function') {
+      runtime.openOptionsPage();
+      return;
+    }
+  } catch (_) {
+    // fall through to the tab fallback
+  }
+  try {
+    if (chrome.tabs && typeof chrome.tabs.create === 'function' && chrome.runtime && typeof chrome.runtime.getURL === 'function') {
+      chrome.tabs.create({ url: chrome.runtime.getURL('options.html') });
+    }
+  } catch (_) {
+    // last resort: nothing actionable left
+  }
+}
+
+try {
+  const action = chrome.action;
+  if (action && action.onClicked && typeof action.onClicked.addListener === 'function') {
+    action.onClicked.addListener(() => openOptionsPageFromBackground());
+  }
+} catch (_) {
+  // non-Chrome family / test environments without the action API
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message) return undefined;
   if (message.type === FETCH_MESSAGE) {

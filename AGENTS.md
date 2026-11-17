@@ -30,6 +30,8 @@ npm run package                # 产出 dist/xhs-enhanced-extension-v<manifest �
 - 发布清单见 `store/checklist.md`；Edge 首次上架必须手动（API 只能更新已发布的商品），之后更新走上述流程。
 - **v2.2.0 发布（2026-11-14，已提交 Edge 审核）**：Release + workflow 全链路跑通至 Edge API。踩坑记录：(1) **HTTP 401** = API key 过期（用户已重新生成）；(2) **HTTP 403 `Client ID is Invalid`** = Client ID 贴错（2026-08 微软侧也有同名 service-side bug，edge-developer#3905）；(3) 轮询接口实际返回 **HTTP 202 + 操作 JSON**（不是文档里的 200）——`scripts/edge-publish.cjs` 已同时接受 200/202 且打印原因短语；(4) `gh run rerun` 复跑的 workflow 用的是**触发 commit 上的旧脚本**，改进后的脚本需用 `gh workflow run release-edge.yml --ref master -f dry_run=false` 才能带上。最终 upload/publish 两个操作均 Succeeded（dispatch run 43608953297），zip 附在 v2.2.0 Release。
 
+- **设置入口（2.3.0）**：扩展 `action` 无 `default_popup`，`background` 注册 `chrome.action.onClicked` → `chrome.runtime.openOptionsPage()`（toolbar 左键直开选项页，static-check 断言 `default_popup` 不得出现）；options.html `open_in_tab: true`，复用同一页；内容脚本“⚙ 设置”按钮走同一 `openOptionsPage()` 路径。
+
 ## 商品详情页高清图下载（M3，2026-11-14 实测）
 
 油猴脚本「小红书商品高清图片下载器」的扩展实现（goods-detail 页注入右侧悬浮面板，`#xhs-enhanced-goods-panel`）：

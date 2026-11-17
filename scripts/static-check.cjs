@@ -34,6 +34,9 @@ assert.deepEqual(manifest.content_scripts[0].js, ['content.js']);
 assert.equal(manifest.background && manifest.background.service_worker, 'background.js');
 assert.equal(manifest.options_ui && manifest.options_ui.page, 'options.html');
 assert.equal(manifest.options_ui && manifest.options_ui.open_in_tab, true);
+// The toolbar icon's left click must reach chrome.action.onClicked (opens the
+// options page), which only happens when the action has no popup.
+assert(!manifest.action || !manifest.action.default_popup, 'action.default_popup would swallow the icon click before onClicked fires');
 for (const permission of ['storage', 'declarativeNetRequestWithHostAccess']) {
   assert(manifest.permissions.includes(permission), `missing permission: ${permission}`);
 }
@@ -67,6 +70,10 @@ assert(Array.isArray(ruleResources) && ruleResources[0].path === 'rules.json' &&
 for (const file of ['extension/content.js', 'extension/options.js', 'extension/background.js']) {
   assert(exists(file), `${file} missing — run npm run build`);
   assert(fs.statSync(path.join(root, file)).size > 1000, `${file} looks stale`);
+}
+const backgroundBundle = read('extension/background.js');
+for (const required of ['onClicked', 'openOptionsPage']) {
+  assert(backgroundBundle.includes(required), `background bundle missing marker: ${required}`);
 }
 const content = read('extension/content.js');
 for (const required of [

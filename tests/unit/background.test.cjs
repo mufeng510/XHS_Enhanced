@@ -258,6 +258,60 @@ test('messages from another extension are refused when the sender id differs', a
   assert.equal(res.error, 'forbidden');
 });
 
+// --- Toolbar icon → options page -------------------------------------------
+function loadBackgroundForAction({ useOpenOptionsPage = true } = {}) {
+  const onMessageListeners = [];
+  const onClickListeners = [];
+  const calls = { openOptionsPage: 0, tabsCreate: [] };
+  const chrome = {
+    runtime: {
+      id: 'test-extension-id',
+      onMessage: { addListener(listener) { onMessageListeners.push(listener); } },
+      getURL(path) { return 'chrome-extension://test-extension-id/' + path; }
+    },
+    action: { onClicked: { addListener(fn) { onClickListeners.push(fn); } } },
+    tabs: {
+      async create(options) { calls.tabsCreate.push(options); return { id: 1 }; }
+    },
+    permissions: { async contains() { return true; } }
+  };
+  if (useOpenOptionsPage) {
+    chrome.runtime.openOptionsPage = async () => { calls.openOptionsPage += 1; };
+  }
+  const context = {
+    console,
+    chrome,
+    fetch: () => { throw new Error('must not fetch'); },
+    setTimeout,
+    clearTimeout,
+    AbortController,
+    URL,
+    Uint8Array,
+    btoa: value => Buffer.from(value, 'binary').toString('base64'),
+    TextDecoder
+  };
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync('extension/background.js', 'utf8'), context);
+  assert.equal(onMessageListeners.length, 1, 'background registers exactly one onMessage listener');
+  return { onClickListeners, calls };
+}
+
+test('left-clicking the toolbar icon opens the options page', async () => {
+  const { onClickListeners, calls } = loadBackgroundForAction();
+  assert.equal(onClickListeners.length, 1, 'background registers exactly one action.onClicked listener');
+  await onClickListeners[0]({ id: 'test-extension-id' });
+  assert.equal(calls.openOptionsPage, 1, 'openOptionsPage called once');
+  assert.equal(calls.tabsCreate.length, 0, 'tab fallback not needed when openOptionsPage exists');
+});
+
+test('falls back to opening options.html in a tab when openOptionsPage is unavailable', async () => {
+  const { onClickListeners, calls } = loadBackgroundForAction({ useOpenOptionsPage: false });
+  assert.equal(onClickListeners.length, 1);
+  await onClickListeners[0]({ id: 'test-extension-id' });
+  assert.equal(calls.tabsCreate.length, 1);
+  assert.equal(calls.tabsCreate[0].url, 'chrome-extension://test-extension-id/options.html');
+});
+
 // --- Hidden-tab note collection (M2 fallback for the batch downloader) -------
 const { COLLECT_NOTE_VIA_TAB_MESSAGE, COLLECT_NOTE_MESSAGE } = require('../../src/lib/remote.js');
 
