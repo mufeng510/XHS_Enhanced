@@ -1649,7 +1649,7 @@
   var GOODS_SECTIONS = Object.freeze(["main", "detail", "other"]);
   var GOODS_SECTION_LABELS = Object.freeze({ main: "\u4E3B\u56FE", detail: "\u8BE6\u60C5\u56FE", other: "\u5176\u5B83" });
   var SECTION_DETAIL_SELECTOR = '[class*="graphic-detail"]';
-  var SECTION_MAIN_SELECTOR = '[class*="layout-swiper"], [class*="layout-slide"], [class*="swiper"], [class*="scroll-x"]';
+  var SECTION_MAIN_SELECTOR = '[class*="layout-swiper"], [class*="layout-slide"], [class*="swiper"], [class*="scroll-x"], [class*="carousel-container"], [class*="carousel-image"], [class*="swiper-area"]';
   var DOCUMENT_POSITION_FOLLOWING = 4;
   function classifyGoodsSection(node, doc) {
     if (!node || typeof node.closest !== "function") return "other";
@@ -3784,6 +3784,19 @@
   }
   function init() {
     if (!ROOT2.document || initialized) return;
+    if (!ROOT2.document.body) {
+      if (typeof ROOT2.document.addEventListener === "function") {
+        const onReady = () => {
+          try {
+            ROOT2.document.removeEventListener("DOMContentLoaded", onReady);
+          } catch (_) {
+          }
+          init();
+        };
+        ROOT2.document.addEventListener("DOMContentLoaded", onReady, { once: true });
+      }
+      return;
+    }
     initialized = true;
     if (isCaptureMode()) {
       initCaptureMode();

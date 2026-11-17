@@ -1720,6 +1720,18 @@ let preferenceChangeHandler = null;
 
   function init() {
     if (!ROOT.document || initialized) return;
+    if (!ROOT.document.body) {
+      // document_start injection or a stripped-down DOM: wait for <body> and
+      // re-run init once it is available (init stays un-burned until then).
+      if (typeof ROOT.document.addEventListener === 'function') {
+        const onReady = () => {
+          try { ROOT.document.removeEventListener('DOMContentLoaded', onReady); } catch (_) {}
+          init();
+        };
+        ROOT.document.addEventListener('DOMContentLoaded', onReady, { once: true });
+      }
+      return;
+    }
     initialized = true;
     if (isCaptureMode()) {
       initCaptureMode();

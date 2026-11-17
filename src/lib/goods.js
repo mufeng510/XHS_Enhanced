@@ -30,7 +30,7 @@ const URL_TEXT_RE = /https?:\/\/[^\s"'<>()\\]+/g;
 export const GOODS_SECTIONS = Object.freeze(['main', 'detail', 'other']);
 export const GOODS_SECTION_LABELS = Object.freeze({ main: '主图', detail: '详情图', other: '其它' });
 const SECTION_DETAIL_SELECTOR = '[class*="graphic-detail"]';
-const SECTION_MAIN_SELECTOR = '[class*="layout-swiper"], [class*="layout-slide"], [class*="swiper"], [class*="scroll-x"]';
+const SECTION_MAIN_SELECTOR = '[class*="layout-swiper"], [class*="layout-slide"], [class*="swiper"], [class*="scroll-x"], [class*="carousel-container"], [class*="carousel-image"], [class*="swiper-area"]';
 const DOCUMENT_POSITION_FOLLOWING = 4;
 
 // 分类规则：① 落在 graphic-detail 容器内 → detail；② 命中主图轮播类名且位于
