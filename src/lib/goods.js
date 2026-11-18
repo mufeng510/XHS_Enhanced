@@ -59,6 +59,29 @@ export function countGoodsSections(entries) {
   return counts;
 }
 
+export const GOODS_COMPRESS_MAX_BYTES = 3 * 1024 * 1024; // 主图压缩目标：3 MiB
+export const JPEG_QUALITY_LADDER = Object.freeze([0.85, 0.75, 0.65, 0.55, 0.45]);
+// 尺寸压缩的渐进比例（在 JPEG 质量全部试完后启用，直到 ≤ 上限或到达下限）
+export const SCALE_DOWN_FACTOR = 0.85;
+export const SCALE_DOWN_MIN = 0.35;
+export const SCALE_DOWN_STEP = 0.15;
+
+// 是否需要重新压缩：仅主图、开关打开、且当前字节数超限时为 true。
+export function shouldCompressGoodsImage(section, byteLength, enabled) {
+  if (!enabled) return false;
+  if (section !== 'main') return false;
+  const size = Number(byteLength);
+  if (!Number.isFinite(size) || size <= 0) return false;
+  return size > GOODS_COMPRESS_MAX_BYTES;
+}
+
+export function scaledDimensions(width, height, factor) {
+  const f = Number(factor);
+  const w = Math.max(1, Math.floor((Number(width) || 1) * (Number.isFinite(f) ? f : 1)));
+  const h = Math.max(1, Math.floor((Number(height) || 1) * (Number.isFinite(f) ? f : 1)));
+  return { width: w, height: h };
+}
+
 export function isGoodsDetailRoute(href) {
   const text = String(href || '');
   if (!text) return false;
@@ -302,6 +325,14 @@ export function buildGoodsInfoText(meta) {
       const at = lines.findIndex(line => line.indexOf('图片数量：') === 0);
       lines.splice(at + 1, 0, '分区：' + parts.join('，'));
     }
+  }
+  const compress = m.compressMain && typeof m.compressMain === 'object' ? m.compressMain : null;
+  if (compress) {
+    const pieces = ['主图压缩：' + (compress.enabled ? '开启（目标 ≤3MB）' : '关闭')];
+    if (Number(compress.compressed) > 0) pieces.push('已压缩 ' + Number(compress.compressed) + ' 张');
+    if (Number(compress.oversize) > 0) pieces.push('仍超过 3MB ' + Number(compress.oversize) + ' 张');
+    if (Number(compress.failed) > 0) pieces.push('无法解码 ' + Number(compress.failed) + ' 张（保留原图）');
+    lines.splice(lines.length - 1, 0, pieces.join('，'));
   }
   return lines.join('\n') + '\n';
 }

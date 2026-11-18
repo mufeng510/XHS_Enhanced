@@ -45,7 +45,7 @@ if(-not $ready){
 $profile = Join-Path (Resolve-Path '.omx/tmp').Path ("xhs-enhanced-browser-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $profile | Out-Null
 try {
-  $argumentString = "--headless --single-process --no-sandbox --disable-gpu --disable-extensions --disable-crash-reporter --no-first-run --no-default-browser-check --disable-features=msEdgeFirstRunExperience,msEdgeSync,msEdgeAccountConsistency --disable-background-networking --no-proxy-server --allow-file-access-from-files --user-data-dir=`"$profile`" --virtual-time-budget=22000 --dump-dom `"$uri`""
+  $argumentString = "--headless --single-process --no-sandbox --disable-gpu --disable-extensions --disable-crash-reporter --no-first-run --no-default-browser-check --disable-features=msEdgeFirstRunExperience,msEdgeSync,msEdgeAccountConsistency --disable-background-networking --no-proxy-server --allow-file-access-from-files --user-data-dir=`"$profile`" --virtual-time-budget=45000 --dump-dom `"$uri`""
   $startInfo = New-Object System.Diagnostics.ProcessStartInfo
   $startInfo.FileName = $browser.Path
   $startInfo.Arguments = $argumentString

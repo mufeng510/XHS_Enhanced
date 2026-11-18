@@ -24,6 +24,14 @@ import {
   GOODS_FORMAT_MODES
 } from '../lib/goods.js';
 import { pickLargestFromSrcset, sniffImageMimeFromBytes } from '../lib/pure.js';
+import {
+  shouldCompressGoodsImage,
+  JPEG_QUALITY_LADDER,
+  GOODS_COMPRESS_MAX_BYTES,
+  SCALE_DOWN_FACTOR,
+  SCALE_DOWN_MIN,
+  scaledDimensions
+} from '../lib/goods.js';
 import { fetchBytes } from '../lib/remote.js';
 import { buildZip, splitZipEntries, MAX_ZIP_BYTES } from '../lib/zip.js';
 import { triggerCoverDownload } from '../lib/cover.js';
@@ -37,6 +45,7 @@ const COUNT_ID = 'xhs-enhanced-goods-count';
 const STATUS_ID = 'xhs-enhanced-goods-status';
 const FORMAT_ID = 'xhs-enhanced-goods-format';
 const DECOR_ID = 'xhs-enhanced-goods-decorations';
+const COMPRESS_ID = 'xhs-enhanced-goods-compress-main';
 const TITLE_TEXT = '📷 商品高清图下载';
 const COUNT_EMPTY = '未扫描';
 const COUNT_NONE = '未发现小红书商品图片';
@@ -49,12 +58,14 @@ let scanButton = null;
 let downloadButton = null;
 let formatSelect = null;
 let decorToggle = null;
+let compressToggle = null;
 let observer = null;
 let rescanTimer = null;
 let autoScanTimer = null;
 let currentImages = [];
 let includeDecorations = false;
 let formatMode = 'png';
+let compressMainEnabled = true; // 主图压缩到 3MB 以内（默认开，可关）
 let inFlight = false;
 
 function utf8Bytes(text) {
@@ -109,6 +120,7 @@ function collectDomImageEntries(doc) {
   for (const node of imageNodes) {
     const section = classifyGoodsSection(node, doc);
     const push = url => { if (url) out.push({ url, section }); };
+
     if (node.currentSrc) push(node.currentSrc);
     for (const attribute of ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-actualsrc', 'data-originalsrc']) {
       const value = node.getAttribute && node.getAttribute(attribute);
@@ -156,6 +168,95 @@ function extForImage(bytes, contentType, url) {
   const match = String(url || '').match(/\.(png|jpe?g|webp|gif|avif|heic)(?:[!?#]|$)/i);
   if (match && match[1]) return match[1].toLowerCase().replace('jpeg', 'jpg');
   return formatMode === 'jpeg' ? 'jpg' : 'png';
+}
+
+// Decode an image blob with createImageBitmap, falling back to <img>+objectURL.
+// Returns null when the bytes cannot be decoded (e.g. HEIC outside a HEIC-
+// capable browser) — callers then keep the original bytes.
+function createImageBitmapSafe(bytes) {
+  const source = bytes && bytes.length ? new Blob([bytes]) : null;
+  if (!source) return Promise.resolve(null);
+  if (typeof createImageBitmap === 'function') {
+    return createImageBitmap(source).then(bitmap => bitmap || null, () => null);
+  }
+  return new Promise(resolve => {
+    try {
+      const url = URL.createObjectURL(source);
+      const img = new Image();
+      img.onload = () => { try { URL.revokeObjectURL(url); } catch (_) {} resolve(img); };
+      img.onerror = () => { try { URL.revokeObjectURL(url); } catch (_) {} resolve(null); };
+      img.src = url;
+    } catch (_) {
+      resolve(null);
+    }
+  });
+}
+
+function sourceDimensions(source) {
+  const width = Number(source && (source.width || source.naturalWidth)) || 0;
+  const height = Number(source && (source.height || source.naturalHeight)) || 0;
+  return { width, height };
+}
+
+function canvasToJpegBlob(canvas, quality) {
+  return new Promise(resolve => {
+    try {
+      if (typeof canvas.convertToBlob === 'function') {
+        canvas.convertToBlob({ type: 'image/jpeg', quality }).then(b => resolve(b || null), () => resolve(null));
+        return;
+      }
+      if (typeof canvas.toBlob === 'function') {
+        canvas.toBlob(b => resolve(b || null), 'image/jpeg', quality);
+        return;
+      }
+      resolve(null);
+    } catch (_) {
+      resolve(null);
+    }
+  });
+}
+
+// Re-encode to JPEG, lowering quality step by step, then shrinking dimensions
+// progressively, until the blob fits GOODS_COMPRESS_MAX_BYTES (or we run out
+// of room and keep the best effort).
+async function compressGoodsImageToLimit(bytes) {
+  const source = await createImageBitmapSafe(bytes);
+  if (!source) return null;
+  const { width, height } = sourceDimensions(source);
+  if (!width || !height) {
+    try { if (source.close) source.close(); } catch (_) {}
+    return null;
+  }
+  let bestBlob = null;
+  const attempt = async (w, h) => {
+    let canvas;
+    try {
+      if (typeof OffscreenCanvas === 'function') canvas = new OffscreenCanvas(w, h);
+      else if (ROOT.document) { canvas = ROOT.document.createElement('canvas'); canvas.width = w; canvas.height = h; }
+      else return null;
+    } catch (_) { return null; }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    try { ctx.drawImage(source, 0, 0, w, h); } catch (_) { return null; }
+    for (const quality of JPEG_QUALITY_LADDER) {
+      const blob = await canvasToJpegBlob(canvas, quality);
+      if (!blob) continue;
+      if (!bestBlob || blob.size < bestBlob.size) bestBlob = blob;
+      if (blob.size <= GOODS_COMPRESS_MAX_BYTES) return blob;
+    }
+    return null;
+  };
+  let blob = await attempt(width, height);
+  if (!blob) {
+    let factor = SCALE_DOWN_FACTOR;
+    while (!blob && factor >= SCALE_DOWN_MIN) {
+      const dims = scaledDimensions(width, height, factor);
+      blob = await attempt(dims.width, dims.height);
+      factor = Math.round((factor - 0.15) * 100) / 100;
+    }
+  }
+  try { if (source.close) source.close(); } catch (_) {}
+  return blob || bestBlob;
 }
 
 function mapWithConcurrencyLocal(items, limit, worker) {
@@ -239,8 +340,12 @@ function onDownload() {
       return { name: buildGoodsImageFileName(seq, entry.ext, section), bytes: entry.bytes };
     });
     const sectionCounts = countGoodsSections(fetched);
+    const compressedCount = fetched.filter(entry => entry.compressed).length;
+    const compressFailedCount = fetched.filter(entry => entry.compressFailed).length;
+    const oversizeMainCount = fetched.filter(entry => entry.section === 'main' && entry.oversize).length;
     const info = buildGoodsInfoText({
-      pageUrl, goodsId, title, scannedAt, count: entries.length, mode: formatMode, sections: sectionCounts
+      pageUrl, goodsId, title, scannedAt, count: entries.length, mode: formatMode, sections: sectionCounts,
+      compressMain: { enabled: compressMainEnabled, compressed: compressedCount, failed: compressFailedCount, oversize: oversizeMainCount }
     });
     entries.unshift({ name: '00_商品信息.txt', bytes: utf8Bytes(info) });
     setStatus('正在打包 ' + entries.length + ' 个文件…');
@@ -254,7 +359,11 @@ function onDownload() {
         triggerCoverDownload(zipBlob, buildGoodsZipFileName(now, entries.length - 1, goodsId, partIndex, parts.length));
       }
       setBusy(false);
-      setStatus('已下载 ' + (entries.length - 1) + ' 张图片（' + (failed ? '失败 ' + failed + ' 张；' : '') + 'zip 已保存）');
+      const details = [];
+      if (failed) details.push('失败 ' + failed + ' 张');
+      if (compressedCount > 0) details.push('主图已压缩 ' + compressedCount + ' 张');
+      if (oversizeMainCount > 0) details.push('主图 ' + oversizeMainCount + ' 张仍超过 3MB');
+      setStatus('已下载 ' + (entries.length - 1) + ' 张图片' + (details.length ? '（' + details.join('；') + '）' : '') + '（zip 已保存）');
     } catch (_) {
       setBusy(false);
       setStatus('打包下载失败');
@@ -265,10 +374,36 @@ function onDownload() {
   });
 }
 
-function packEntry(url, res, section) {
+// Pack one fetched image into a zip entry payload (name assigned later, per section).
+// Main images larger than 3MB are re-encoded (lower JPEG quality, then smaller
+// dimensions) when the panel's 主图压缩 switch is on.
+async function packEntry(url, res, section) {
   const bytes = res && res.ok && res.bytes && res.bytes.length ? res.bytes : null;
   if (!bytes) return { entry: null };
-  const ext = extForImage(bytes, res.contentType, url);
+  let ext = extForImage(bytes, res.contentType, url);
+  if (shouldCompressGoodsImage(section, bytes.length, compressMainEnabled)) {
+    const blob = await compressGoodsImageToLimit(bytes);
+    if (blob) {
+      const buffer = await blob.arrayBuffer();
+      const compressed = new Uint8Array(buffer);
+      if (compressed.length && compressed.length <= GOODS_COMPRESS_MAX_BYTES) {
+        return { entry: { name: '', bytes: compressed, ext: 'jpg', section, compressed: true, oversize: false } };
+      }
+      if (compressed.length && compressed.length < bytes.length) {
+        return { entry: { name: '', bytes: compressed, ext: 'jpg', section, compressed: true, oversize: true } };
+      }
+    }
+    // Decode/re-encode failed or produced a larger file: keep the original
+    // bytes and mark it so the summary can report it.
+    return {
+      entry: {
+        name: '', bytes, ext, section,
+        compressed: false,
+        oversize: true,
+        compressFailed: true
+      }
+    };
+  }
   return { entry: { name: '', bytes, ext, section } };
 }
 
@@ -276,6 +411,11 @@ function onDecorationsToggle() {
   includeDecorations = Boolean(decorToggle && decorToggle.checked);
   rescan(true);
   setStatus(includeDecorations ? '已包含头像/表情等修饰图' : '已排除头像/表情等修饰图');
+}
+
+function onCompressToggle() {
+  compressMainEnabled = Boolean(compressToggle && compressToggle.checked);
+  setStatus(compressMainEnabled ? '主图将压缩到 3MB 以内' : '主图不压缩（保留原始字节）');
 }
 
 function onFormatChange() {
@@ -345,6 +485,17 @@ function buildPanel() {
   decorLabel.appendChild(decorToggle);
   decorLabel.appendChild(doc.createTextNode('包含头像/表情等修饰图'));
   element.appendChild(decorLabel);
+
+  const compressLabel = doc.createElement('label');
+  compressLabel.className = 'xhs-enhanced-goods-check';
+  compressToggle = doc.createElement('input');
+  compressToggle.type = 'checkbox';
+  compressToggle.id = COMPRESS_ID;
+  compressToggle.checked = compressMainEnabled;
+  compressToggle.addEventListener('change', onCompressToggle);
+  compressLabel.appendChild(compressToggle);
+  compressLabel.appendChild(doc.createTextNode('主图大小压缩到 3MB 以内'));
+  element.appendChild(compressLabel);
 
   countNode = doc.createElement('p');
   countNode.id = COUNT_ID;
@@ -417,6 +568,7 @@ export function removeGoodsPanel() {
   downloadButton = null;
   formatSelect = null;
   decorToggle = null;
+  compressToggle = null;
   currentImages = [];
   inFlight = false;
 }

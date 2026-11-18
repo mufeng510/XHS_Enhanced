@@ -747,6 +747,9 @@
     const detailImg = document.createElement('img');
     detailImg.setAttribute('src', 'https://fe-img-qc.xhscdn.com/base2/1040g2goods0000000000000000000000000002?imageView2/2/w/1080/format/webp');
     detailContainer.appendChild(detailImg);
+    const compressImg = document.createElement('img');
+    compressImg.setAttribute('src', 'https://mall-i1.xhscdn.com/arkgoods/1040g2goods0000000000000000000000000009compress-target!nd_dft_wlteh_webp_3');
+    swiper.appendChild(compressImg);
     const staticAsset = document.createElement('img');
     staticAsset.setAttribute('src', 'https://fe-static.xhscdn.com/formula-static/goods-detail/public/js/main.d4927ba.js');
     const avatarImg = document.createElement('img');
@@ -784,7 +787,7 @@
     // Download: every fetched byte is the harness mock JPEG, so the zip flow
     // completes and the status line announces the save.
     document.getElementById('xhs-enhanced-goods-download').click();
-    const deadline = Date.now() + 4000;
+    const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
       const status = document.getElementById('xhs-enhanced-goods-status');
       if (status && /已下载|下载失败|失败/.test(status.textContent)) break;
@@ -792,6 +795,25 @@
     }
     const finalStatus = document.getElementById('xhs-enhanced-goods-status');
     assert(finalStatus && /已下载/.test(finalStatus.textContent), 'download completes and reports the saved count', finalStatus ? finalStatus.textContent : '<no status node>');
+    // Main-image compression: the big mock image must be re-encoded, and the
+    // status line must announce it; the toggle defaults to checked.
+    const compressToggle = document.getElementById('xhs-enhanced-goods-compress-main');
+    assert(Boolean(compressToggle) && compressToggle.checked, 'compress-main checkbox defaults to checked');
+    assert(/主图已压缩/.test(finalStatus.textContent), 'download re-encodes oversize main images', finalStatus.textContent);
+    compressToggle.checked = false;
+    compressToggle.dispatchEvent(new Event('change'));
+    await checkpoint();
+    document.getElementById('xhs-enhanced-goods-download').click();
+    const secondDeadline = Date.now() + 15000;
+    while (Date.now() < secondDeadline) {
+      const s = document.getElementById('xhs-enhanced-goods-status');
+      if (s && /已下载|失败/.test(s.textContent)) break;
+      await delay(50);
+    }
+    const secondStatus = document.getElementById('xhs-enhanced-goods-status');
+    assert(secondStatus && !/主图已压缩/.test(secondStatus.textContent), 'disabling compress-main keeps original bytes', secondStatus ? secondStatus.textContent : '<no status node>');
+    compressToggle.checked = true;
+    compressToggle.dispatchEvent(new Event('change'));
     // Leaving the goods route removes the panel (SPA navigation safety).
     api.setTestRoute('/search_result');
     await checkpoint();
@@ -822,7 +844,7 @@
     document.title = `XHS-HARNESS|${status}|${terminalWrites}|${assertions}|${encodeURIComponent(failures[0] || '')}`;
   }
 
-  const suiteTimeout = setTimeout(() => { failures.push('suite timeout'); finish('fail'); }, 25000);
+  const suiteTimeout = setTimeout(() => { failures.push('suite timeout'); finish('fail'); }, 45000);
   (async () => {
     try {
       assert(Boolean(api), 'test API installed');

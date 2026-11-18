@@ -1670,6 +1670,23 @@
     }
     return counts;
   }
+  var GOODS_COMPRESS_MAX_BYTES = 3 * 1024 * 1024;
+  var JPEG_QUALITY_LADDER = Object.freeze([0.85, 0.75, 0.65, 0.55, 0.45]);
+  var SCALE_DOWN_FACTOR = 0.85;
+  var SCALE_DOWN_MIN = 0.35;
+  function shouldCompressGoodsImage(section, byteLength, enabled) {
+    if (!enabled) return false;
+    if (section !== "main") return false;
+    const size = Number(byteLength);
+    if (!Number.isFinite(size) || size <= 0) return false;
+    return size > GOODS_COMPRESS_MAX_BYTES;
+  }
+  function scaledDimensions(width, height, factor) {
+    const f = Number(factor);
+    const w = Math.max(1, Math.floor((Number(width) || 1) * (Number.isFinite(f) ? f : 1)));
+    const h = Math.max(1, Math.floor((Number(height) || 1) * (Number.isFinite(f) ? f : 1)));
+    return { width: w, height: h };
+  }
   function isGoodsDetailRoute(href) {
     const text = String(href || "");
     if (!text) return false;
@@ -1872,6 +1889,14 @@
         lines.splice(at + 1, 0, "\u5206\u533A\uFF1A" + parts.join("\uFF0C"));
       }
     }
+    const compress = m.compressMain && typeof m.compressMain === "object" ? m.compressMain : null;
+    if (compress) {
+      const pieces = ["\u4E3B\u56FE\u538B\u7F29\uFF1A" + (compress.enabled ? "\u5F00\u542F\uFF08\u76EE\u6807 \u22643MB\uFF09" : "\u5173\u95ED")];
+      if (Number(compress.compressed) > 0) pieces.push("\u5DF2\u538B\u7F29 " + Number(compress.compressed) + " \u5F20");
+      if (Number(compress.oversize) > 0) pieces.push("\u4ECD\u8D85\u8FC7 3MB " + Number(compress.oversize) + " \u5F20");
+      if (Number(compress.failed) > 0) pieces.push("\u65E0\u6CD5\u89E3\u7801 " + Number(compress.failed) + " \u5F20\uFF08\u4FDD\u7559\u539F\u56FE\uFF09");
+      lines.splice(lines.length - 1, 0, pieces.join("\uFF0C"));
+    }
     return lines.join("\n") + "\n";
   }
   function getGoodsTitleFromDocument(documentRef) {
@@ -1894,6 +1919,7 @@
   var STATUS_ID = "xhs-enhanced-goods-status";
   var FORMAT_ID = "xhs-enhanced-goods-format";
   var DECOR_ID = "xhs-enhanced-goods-decorations";
+  var COMPRESS_ID = "xhs-enhanced-goods-compress-main";
   var TITLE_TEXT = "\u{1F4F7} \u5546\u54C1\u9AD8\u6E05\u56FE\u4E0B\u8F7D";
   var COUNT_EMPTY = "\u672A\u626B\u63CF";
   var COUNT_NONE = "\u672A\u53D1\u73B0\u5C0F\u7EA2\u4E66\u5546\u54C1\u56FE\u7247";
@@ -1905,12 +1931,14 @@
   var downloadButton = null;
   var formatSelect = null;
   var decorToggle = null;
+  var compressToggle = null;
   var observer = null;
   var rescanTimer = null;
   var autoScanTimer = null;
   var currentImages = [];
   var includeDecorations = false;
   var formatMode = "png";
+  var compressMainEnabled = true;
   var inFlight = false;
   function utf8Bytes(text) {
     const source = String(text == null ? "" : text);
@@ -2002,6 +2030,112 @@
     if (match && match[1]) return match[1].toLowerCase().replace("jpeg", "jpg");
     return formatMode === "jpeg" ? "jpg" : "png";
   }
+  function createImageBitmapSafe(bytes) {
+    const source = bytes && bytes.length ? new Blob([bytes]) : null;
+    if (!source) return Promise.resolve(null);
+    if (typeof createImageBitmap === "function") {
+      return createImageBitmap(source).then((bitmap) => bitmap || null, () => null);
+    }
+    return new Promise((resolve) => {
+      try {
+        const url = URL.createObjectURL(source);
+        const img = new Image();
+        img.onload = () => {
+          try {
+            URL.revokeObjectURL(url);
+          } catch (_) {
+          }
+          resolve(img);
+        };
+        img.onerror = () => {
+          try {
+            URL.revokeObjectURL(url);
+          } catch (_) {
+          }
+          resolve(null);
+        };
+        img.src = url;
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+  function sourceDimensions(source) {
+    const width = Number(source && (source.width || source.naturalWidth)) || 0;
+    const height = Number(source && (source.height || source.naturalHeight)) || 0;
+    return { width, height };
+  }
+  function canvasToJpegBlob(canvas, quality) {
+    return new Promise((resolve) => {
+      try {
+        if (typeof canvas.convertToBlob === "function") {
+          canvas.convertToBlob({ type: "image/jpeg", quality }).then((b) => resolve(b || null), () => resolve(null));
+          return;
+        }
+        if (typeof canvas.toBlob === "function") {
+          canvas.toBlob((b) => resolve(b || null), "image/jpeg", quality);
+          return;
+        }
+        resolve(null);
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+  async function compressGoodsImageToLimit(bytes) {
+    const source = await createImageBitmapSafe(bytes);
+    if (!source) return null;
+    const { width, height } = sourceDimensions(source);
+    if (!width || !height) {
+      try {
+        if (source.close) source.close();
+      } catch (_) {
+      }
+      return null;
+    }
+    let bestBlob = null;
+    const attempt = async (w, h) => {
+      let canvas;
+      try {
+        if (typeof OffscreenCanvas === "function") canvas = new OffscreenCanvas(w, h);
+        else if (ROOT.document) {
+          canvas = ROOT.document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+        } else return null;
+      } catch (_) {
+        return null;
+      }
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+      try {
+        ctx.drawImage(source, 0, 0, w, h);
+      } catch (_) {
+        return null;
+      }
+      for (const quality of JPEG_QUALITY_LADDER) {
+        const blob2 = await canvasToJpegBlob(canvas, quality);
+        if (!blob2) continue;
+        if (!bestBlob || blob2.size < bestBlob.size) bestBlob = blob2;
+        if (blob2.size <= GOODS_COMPRESS_MAX_BYTES) return blob2;
+      }
+      return null;
+    };
+    let blob = await attempt(width, height);
+    if (!blob) {
+      let factor = SCALE_DOWN_FACTOR;
+      while (!blob && factor >= SCALE_DOWN_MIN) {
+        const dims = scaledDimensions(width, height, factor);
+        blob = await attempt(dims.width, dims.height);
+        factor = Math.round((factor - 0.15) * 100) / 100;
+      }
+    }
+    try {
+      if (source.close) source.close();
+    } catch (_) {
+    }
+    return blob || bestBlob;
+  }
   function mapWithConcurrencyLocal(items, limit, worker) {
     const list = Array.isArray(items) ? items : [];
     const lanes = [];
@@ -2081,6 +2215,9 @@
         return { name: buildGoodsImageFileName(seq, entry.ext, section), bytes: entry.bytes };
       });
       const sectionCounts = countGoodsSections(fetched);
+      const compressedCount = fetched.filter((entry) => entry.compressed).length;
+      const compressFailedCount = fetched.filter((entry) => entry.compressFailed).length;
+      const oversizeMainCount = fetched.filter((entry) => entry.section === "main" && entry.oversize).length;
       const info = buildGoodsInfoText({
         pageUrl,
         goodsId,
@@ -2088,7 +2225,8 @@
         scannedAt,
         count: entries.length,
         mode: formatMode,
-        sections: sectionCounts
+        sections: sectionCounts,
+        compressMain: { enabled: compressMainEnabled, compressed: compressedCount, failed: compressFailedCount, oversize: oversizeMainCount }
       });
       entries.unshift({ name: "00_\u5546\u54C1\u4FE1\u606F.txt", bytes: utf8Bytes(info) });
       setStatus("\u6B63\u5728\u6253\u5305 " + entries.length + " \u4E2A\u6587\u4EF6\u2026");
@@ -2102,7 +2240,11 @@
           triggerCoverDownload(zipBlob, buildGoodsZipFileName(now, entries.length - 1, goodsId, partIndex, parts.length));
         }
         setBusy(false);
-        setStatus("\u5DF2\u4E0B\u8F7D " + (entries.length - 1) + " \u5F20\u56FE\u7247\uFF08" + (failed ? "\u5931\u8D25 " + failed + " \u5F20\uFF1B" : "") + "zip \u5DF2\u4FDD\u5B58\uFF09");
+        const details = [];
+        if (failed) details.push("\u5931\u8D25 " + failed + " \u5F20");
+        if (compressedCount > 0) details.push("\u4E3B\u56FE\u5DF2\u538B\u7F29 " + compressedCount + " \u5F20");
+        if (oversizeMainCount > 0) details.push("\u4E3B\u56FE " + oversizeMainCount + " \u5F20\u4ECD\u8D85\u8FC7 3MB");
+        setStatus("\u5DF2\u4E0B\u8F7D " + (entries.length - 1) + " \u5F20\u56FE\u7247" + (details.length ? "\uFF08" + details.join("\uFF1B") + "\uFF09" : "") + "\uFF08zip \u5DF2\u4FDD\u5B58\uFF09");
       } catch (_) {
         setBusy(false);
         setStatus("\u6253\u5305\u4E0B\u8F7D\u5931\u8D25");
@@ -2112,16 +2254,44 @@
       setStatus("\u4E0B\u8F7D\u5931\u8D25");
     });
   }
-  function packEntry(url, res, section) {
+  async function packEntry(url, res, section) {
     const bytes = res && res.ok && res.bytes && res.bytes.length ? res.bytes : null;
     if (!bytes) return { entry: null };
-    const ext = extForImage(bytes, res.contentType, url);
+    let ext = extForImage(bytes, res.contentType, url);
+    if (shouldCompressGoodsImage(section, bytes.length, compressMainEnabled)) {
+      const blob = await compressGoodsImageToLimit(bytes);
+      if (blob) {
+        const buffer = await blob.arrayBuffer();
+        const compressed = new Uint8Array(buffer);
+        if (compressed.length && compressed.length <= GOODS_COMPRESS_MAX_BYTES) {
+          return { entry: { name: "", bytes: compressed, ext: "jpg", section, compressed: true, oversize: false } };
+        }
+        if (compressed.length && compressed.length < bytes.length) {
+          return { entry: { name: "", bytes: compressed, ext: "jpg", section, compressed: true, oversize: true } };
+        }
+      }
+      return {
+        entry: {
+          name: "",
+          bytes,
+          ext,
+          section,
+          compressed: false,
+          oversize: true,
+          compressFailed: true
+        }
+      };
+    }
     return { entry: { name: "", bytes, ext, section } };
   }
   function onDecorationsToggle() {
     includeDecorations = Boolean(decorToggle && decorToggle.checked);
     rescan(true);
     setStatus(includeDecorations ? "\u5DF2\u5305\u542B\u5934\u50CF/\u8868\u60C5\u7B49\u4FEE\u9970\u56FE" : "\u5DF2\u6392\u9664\u5934\u50CF/\u8868\u60C5\u7B49\u4FEE\u9970\u56FE");
+  }
+  function onCompressToggle() {
+    compressMainEnabled = Boolean(compressToggle && compressToggle.checked);
+    setStatus(compressMainEnabled ? "\u4E3B\u56FE\u5C06\u538B\u7F29\u5230 3MB \u4EE5\u5185" : "\u4E3B\u56FE\u4E0D\u538B\u7F29\uFF08\u4FDD\u7559\u539F\u59CB\u5B57\u8282\uFF09");
   }
   function onFormatChange() {
     formatMode = formatSelect ? formatSelect.value : "png";
@@ -2184,6 +2354,16 @@
     decorLabel.appendChild(decorToggle);
     decorLabel.appendChild(doc.createTextNode("\u5305\u542B\u5934\u50CF/\u8868\u60C5\u7B49\u4FEE\u9970\u56FE"));
     element.appendChild(decorLabel);
+    const compressLabel = doc.createElement("label");
+    compressLabel.className = "xhs-enhanced-goods-check";
+    compressToggle = doc.createElement("input");
+    compressToggle.type = "checkbox";
+    compressToggle.id = COMPRESS_ID;
+    compressToggle.checked = compressMainEnabled;
+    compressToggle.addEventListener("change", onCompressToggle);
+    compressLabel.appendChild(compressToggle);
+    compressLabel.appendChild(doc.createTextNode("\u4E3B\u56FE\u5927\u5C0F\u538B\u7F29\u5230 3MB \u4EE5\u5185"));
+    element.appendChild(compressLabel);
     countNode = doc.createElement("p");
     countNode.id = COUNT_ID;
     countNode.className = "xhs-enhanced-goods-count";
@@ -2256,6 +2436,7 @@
     downloadButton = null;
     formatSelect = null;
     decorToggle = null;
+    compressToggle = null;
     currentImages = [];
     inFlight = false;
   }
@@ -3915,6 +4096,12 @@
     buildGoodsInfoText,
     getGoodsTitleFromDocument,
     GOODS_FORMAT_MODES,
+    shouldCompressGoodsImage,
+    JPEG_QUALITY_LADDER,
+    GOODS_COMPRESS_MAX_BYTES,
+    SCALE_DOWN_FACTOR,
+    SCALE_DOWN_MIN,
+    scaledDimensions,
     buildDetailNoteUrl,
     resolveSaveUrlFromCard,
     cardNoteTargetId,

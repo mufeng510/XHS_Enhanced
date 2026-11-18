@@ -28,6 +28,27 @@
         globalThis.__XHSE_LAST_CALLS__ = globalThis.__XHSE_LAST_CALLS__ || [];
         globalThis.__XHSE_LAST_CALLS__.push(message);
         if (message && message.responseType === 'arraybuffer') {
+          if (/compress-target/.test(String((message && message.url) || ''))) {
+            // Large synthetic JPEG (>3MB) to exercise the main-image compression path.
+            var big = globalThis.__XHSE_BIG_JPEG_BASE64__;
+            if (!big) {
+              var c = document.createElement('canvas');
+              c.width = 2000; c.height = 2000;
+              var cx = c.getContext('2d');
+              var seed = 12345;
+              var rand = function () { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+              var imgData = cx.createImageData(2000, 2000);
+              for (var i = 0; i < imgData.data.length; i += 4) {
+                var v = (rand() * 255) | 0;
+                imgData.data[i] = v; imgData.data[i + 1] = (v * 7 + 13) & 255; imgData.data[i + 2] = (rand() * 255) | 0; imgData.data[i + 3] = 255;
+              }
+              cx.putImageData(imgData, 0, 0);
+              var dataUrl = c.toDataURL('image/jpeg', 0.95);
+              big = dataUrl.split(',')[1];
+              globalThis.__XHSE_BIG_JPEG_BASE64__ = big;
+            }
+            return Promise.resolve({ ok: true, status: 200, base64: big, contentType: 'image/jpeg' });
+          }
           // Privileged CDN bytes: hand back a small valid JPEG for every image.
           return Promise.resolve({ ok: true, status: 200, base64: FAKE_JPEG_BASE64, contentType: 'image/jpeg' });
         }

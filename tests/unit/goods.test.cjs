@@ -169,6 +169,30 @@ test('batch layout defaults to flat when unset; explicit notes round-trips', () 
   assert.equal(api.readStoredBatchLayout({ getItem: () => 'nonsense' }), 'flat');
 });
 
+test('main-image compression planner respects toggle, section and size limit', () => {
+  const api = load();
+  const MB = 1024 * 1024;
+  assert.equal(api.GOODS_COMPRESS_MAX_BYTES, 3 * MB);
+  assert.deepEqual(Array.from(api.JPEG_QUALITY_LADDER), [0.85, 0.75, 0.65, 0.55, 0.45]);
+  assert.equal(api.SCALE_DOWN_FACTOR, 0.85);
+  assert.equal(api.SCALE_DOWN_MIN, 0.35);
+  assert.equal(api.shouldCompressGoodsImage('main', 4 * MB, true), true);
+  assert.equal(api.shouldCompressGoodsImage('main', 3 * MB, true), false, 'exactly 3MB is within the limit');
+  assert.equal(api.shouldCompressGoodsImage('main', 2 * MB, true), false);
+  assert.equal(api.shouldCompressGoodsImage('detail', 4 * MB, true), false, 'only main images are compressed');
+  assert.equal(api.shouldCompressGoodsImage('other', 4 * MB, true), false);
+  assert.equal(api.shouldCompressGoodsImage('main', 4 * MB, false), false, 'toggle off disables compression');
+  assert.equal(api.shouldCompressGoodsImage('main', 0, true), false);
+  assert.equal(api.shouldCompressGoodsImage('main', NaN, true), false);
+  { const d = api.scaledDimensions(2000, 1000, 0.5); assert.equal(d.width, 1000); assert.equal(d.height, 500); }
+  { const d = api.scaledDimensions(1, 1, 0.1); assert.equal(d.width, 1); assert.equal(d.height, 1); }
+  { const d = api.scaledDimensions(2000, 1000, NaN); assert.equal(d.width, 2000); assert.equal(d.height, 1000); }
+  const info = api.buildGoodsInfoText({ pageUrl: 'u', goodsId: 'g', title: 't', scannedAt: 'now', count: 3, mode: 'png', compressMain: { enabled: true, compressed: 2, failed: 1, oversize: 1 } });
+  assert(info.includes('主图压缩：开启') && info.includes('已压缩 2 张') && info.includes('无法解码 1 张'), 'info.txt reports compression stats');
+  const infoOff = api.buildGoodsInfoText({ pageUrl: 'u', goodsId: 'g', title: 't', scannedAt: 'now', count: 1, mode: 'png', compressMain: { enabled: false, compressed: 0, failed: 0, oversize: 0 } });
+  assert(infoOff.includes('主图压缩：关闭'), 'info.txt shows disabled state');
+});
+
 test('goods title parser strips the 小红书 suffix/prefix', () => {
   const api = load();
   assert.equal(api.getGoodsTitleFromDocument({ title: '某品牌保温杯 - 小红书' }), '某品牌保温杯');

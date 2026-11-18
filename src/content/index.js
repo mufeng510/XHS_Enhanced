@@ -99,7 +99,13 @@ import {
   buildGoodsImageFileName,
   buildGoodsInfoText,
   getGoodsTitleFromDocument,
-  GOODS_FORMAT_MODES
+  GOODS_FORMAT_MODES,
+  shouldCompressGoodsImage,
+  JPEG_QUALITY_LADDER,
+  GOODS_COMPRESS_MAX_BYTES,
+  SCALE_DOWN_FACTOR,
+  SCALE_DOWN_MIN,
+  scaledDimensions
 } from '../lib/goods.js';
 import { syncGoodsPanel, removeGoodsPanel, getGoodsImagesSnapshot } from './goods.js';
 
@@ -1812,6 +1818,8 @@ let preferenceChangeHandler = null;
     normalizeGoodsSection, GOODS_SECTION_LABELS,
     toHDGoodsUrl, extensionForMime, buildGoodsZipFileName, buildGoodsImageFileName,
     buildGoodsInfoText, getGoodsTitleFromDocument, GOODS_FORMAT_MODES,
+    shouldCompressGoodsImage, JPEG_QUALITY_LADDER, GOODS_COMPRESS_MAX_BYTES,
+    SCALE_DOWN_FACTOR, SCALE_DOWN_MIN, scaledDimensions,
     buildDetailNoteUrl, resolveSaveUrlFromCard, cardNoteTargetId, resolveCardNoteLink,
     extractCardTitle, snapshotFromCard, onBatchDownload, mapWithConcurrency,
     buildZip, splitZipEntries, buildBatchZipFileName, buildNoteFolderName, buildImageFileName,
