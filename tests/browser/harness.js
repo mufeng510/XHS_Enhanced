@@ -608,6 +608,88 @@
     delete globalThis.__XHS_CHROME_STORE__['xhs-enhanced:focus-popular'];
   }
 
+  async function goodsSkuImages() {
+    api.setTestRoute('/goods-detail/685d0fe3c16548001691655c');
+    await checkpoint();
+    const panel = document.getElementById('xhs-enhanced-goods-panel');
+    assert(Boolean(panel), 'goods panel present for SKU test');
+    const skuToggle = document.getElementById('xhs-enhanced-goods-sku');
+    assert(Boolean(skuToggle) && skuToggle.checked, 'SKU checkbox exists and defaults to checked');
+    sandbox.replaceChildren();
+    const gallery = document.createElement('div');
+    gallery.className = 'layout-swiper';
+    const main = document.createElement('img');
+    main.src = 'https://sns-webpic-qc.xhscdn.com/base1/1040g2goods0000000000000000000000000001!nd_dft_wlteh_webp_3';
+    gallery.appendChild(main);
+    // 真实页面里 `p.selected-text` 是 SKU 面板的入口；点击后页面请求签名接口，
+    // 响应 template_data[] 带每个规格名 + 预览图。harness 用 postMessage 模拟响应。
+    const skuAnchor = document.createElement('p');
+    skuAnchor.className = 'selected-text';
+    skuAnchor.textContent = '原创红色小羊';
+    skuAnchor.addEventListener('click', () => {
+      setTimeout(() => {
+        window.postMessage({
+          __xhsEnhancedSku: true,
+          body: JSON.stringify({
+            data: {
+              template_data: [
+                { contentE1: { variants: [{ value: '原创红色小羊' }] }, headerV4: { previewImage: 'https://mall-i1.xhscdn.com/arkgoods/1040g3ng326sbj0dkk4a05phq89shol8ue0tjuj8?imageView2/2/w/1080/format/webp/q/80' } },
+                { contentE1: { variants: [{ value: '原创白色小羊' }] }, headerV4: { previewImage: 'https://mall-i1.xhscdn.com/arkgoods/1040g3ng3272jofqe6i705phq89shol8uid1b8og' } }
+              ]
+            }
+          })
+        }, '*');
+      }, 30);
+    });
+    sandbox.append(gallery, skuAnchor);
+    document.getElementById('xhs-enhanced-goods-scan').click();
+    await checkpoint();
+    const zipBlobs = [];
+    const originalCreateObjectURL = URL.createObjectURL.bind(URL);
+    const originalAnchorClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = blob => { zipBlobs.push(blob); return 'blob:xhs-enhanced-sku-' + zipBlobs.length; };
+    HTMLAnchorElement.prototype.click = function noop() {};
+    document.getElementById('xhs-enhanced-goods-download').click();
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      const status = document.getElementById('xhs-enhanced-goods-status');
+      if (status && /已下载|失败/.test(status.textContent)) break;
+      await delay(50);
+    }
+    URL.createObjectURL = originalCreateObjectURL;
+    HTMLAnchorElement.prototype.click = originalAnchorClick;
+    const status = document.getElementById('xhs-enhanced-goods-status');
+    assert(status && /SKU 图 2 张/.test(status.textContent), 'download status reports 2 SKU images', status ? status.textContent : '<none>');
+    assert(zipBlobs.length === 1, 'one zip produced for SKU download');
+    const text = new TextDecoder().decode(await zipBlobs[0].arrayBuffer());
+    assert(text.includes('SKU_原创红色小羊_01.jpg'), 'zip contains per-spec filename for red sheep');
+    assert(text.includes('SKU_原创白色小羊_01.jpg'), 'zip contains per-spec filename for white sheep');
+    assert(text.includes('SKU 规格：') && text.includes('原创红色小羊 → SKU_原创红色小羊_01.jpg'), 'info.txt maps each spec to its file');
+
+    // SKU 开关关闭后不再抓取规格图，zip 里也不该出现 SKU_ 前缀文件。
+    skuToggle.checked = false;
+    skuToggle.dispatchEvent(new Event('change'));
+    await checkpoint();
+    const secondBlobs = [];
+    URL.createObjectURL = blob => { secondBlobs.push(blob); return 'blob:xhs-enhanced-sku-off-' + secondBlobs.length; };
+    HTMLAnchorElement.prototype.click = function noop() {};
+    document.getElementById('xhs-enhanced-goods-download').click();
+    const deadline2 = Date.now() + 15000;
+    while (Date.now() < deadline2) {
+      const s = document.getElementById('xhs-enhanced-goods-status');
+      if (s && /已下载|失败/.test(s.textContent)) break;
+      await delay(50);
+    }
+    URL.createObjectURL = originalCreateObjectURL;
+    HTMLAnchorElement.prototype.click = originalAnchorClick;
+    const text2 = secondBlobs.length ? new TextDecoder().decode(await secondBlobs[0].arrayBuffer()) : '';
+    assert(!text2.includes('SKU_原创'), 'disabling SKU toggle omits SKU images from zip');
+    skuToggle.checked = true;
+    skuToggle.dispatchEvent(new Event('change'));
+    api.setTestRoute('/search_result');
+    await checkpoint();
+  }
+
   async function dynamicAndAttributes() {
     api.setTestRoute('/search_result');
     await useFixture('dynamic-source', '#dynamic-fixture');
@@ -856,6 +938,7 @@
       await batchScopeModeAndInnerImages();
       await batchLayoutFlatMode();
       await goodsDetailDownload();
+      await goodsSkuImages();
       await dynamicAndAttributes();
       await jumpNavigation();
       await focusMode();

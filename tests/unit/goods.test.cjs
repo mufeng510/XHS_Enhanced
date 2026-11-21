@@ -169,6 +169,55 @@ test('batch layout defaults to flat when unset; explicit notes round-trips', () 
   assert.equal(api.readStoredBatchLayout({ getItem: () => 'nonsense' }), 'flat');
 });
 
+test('SKU section helpers classify, count, dedupe and name per spec', () => {
+  const api = load();
+  assert.equal(api.normalizeGoodsSection('sku'), 'sku');
+  assert.equal(api.normalizeGoodsSection('main'), 'main');
+  assert.equal(api.normalizeGoodsSection('bogus'), 'other');
+  assert.deepEqual(api.GOODS_SECTION_LABELS.sku, 'SKU 图');
+  const counts = api.countGoodsSections([
+    { section: 'main' }, { section: 'detail' }, { section: 'sku' }, { section: 'sku' }, { section: 'other' }
+  ]);
+  assert.equal(counts.main, 1);
+  assert.equal(counts.detail, 1);
+  assert.equal(counts.sku, 2);
+  assert.equal(counts.other, 1);
+
+  const skuA = 'https://mall-i1.xhscdn.com/arkgoods/1040g3ng326sbj0dkk4a05phq89shol8ue0tjuj8?imageView2/2/w/1080/format/webp/q/80';
+  const skuB = 'https://mall-i1.xhscdn.com/arkgoods/1040g3ng3272jofqe6i705phq89shol8uid1b8og';
+  const deduped = api.dedupeSkuEntries([
+    { url: skuA, skuName: '原创红色小羊' },
+    { url: skuA, skuName: '原创红色小羊' }, // 同规格同图 → 折叠
+    { url: skuA + '&ap=3', skuName: '原创红色小羊' }, // query 不同仍折叠
+    { url: skuB, skuName: '原创白色小羊' }, // 不同规格同主机 → 保留
+    { url: 'https://fe-static.xhscdn.com/formula-static/goods-detail/public/js/main.js', skuName: 'x' },
+    { url: skuA, skuName: '' }
+  ]);
+  assert.equal(deduped.length, 2);
+  assert.equal(deduped[0].section, 'sku');
+  assert.equal(deduped[0].skuName, '原创红色小羊');
+  assert.equal(deduped[1].skuName, '原创白色小羊');
+
+  const n1 = api.buildGoodsSkuImageFileName('原创红色小羊', 0, 'jpg');
+  assert.equal(n1, 'SKU_原创红色小羊_01.jpg');
+  assert.equal(api.buildGoodsSkuImageFileName('原创红色小羊【新年限定】', 1, 'png'), 'SKU_原创红色小羊【新年限定】_02.png');
+  assert.equal(api.buildGoodsSkuImageFileName('a/b?c*d', 0, 'jpeg'), 'SKU_a b c d_01.jpeg');
+  assert.ok(api.buildGoodsSkuImageFileName('规格', 0, '').endsWith('_01.jpg'));
+  const long = api.buildGoodsSkuImageFileName('x'.repeat(60), 0, 'jpg');
+  assert.ok(long.startsWith('SKU_') && long.length < 60, 'spec name is truncated');
+
+  const info = api.buildGoodsInfoText({
+    pageUrl: 'u', goodsId: 'g', title: 't', scannedAt: 'now', count: 7, mode: 'png',
+    sections: { main: 1, detail: 1, sku: 4, other: 1 },
+    skus: [
+      { name: '原创红色小羊', file: 'SKU_原创红色小羊_01.jpg' },
+      { name: '原创白色小羊', file: 'SKU_原创白色小羊_01.jpg' }
+    ]
+  });
+  assert(info.includes('SKU 图 4 张'), 'info.txt reports SKU count');
+  assert(info.includes('SKU 规格：') && info.includes('原创红色小羊 → SKU_原创红色小羊_01.jpg'), 'info.txt maps spec → file');
+});
+
 test('main-image compression planner respects toggle, section and size limit', () => {
   const api = load();
   const MB = 1024 * 1024;

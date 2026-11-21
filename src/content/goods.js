@@ -30,7 +30,9 @@ import {
   GOODS_COMPRESS_MAX_BYTES,
   SCALE_DOWN_FACTOR,
   SCALE_DOWN_MIN,
-  scaledDimensions
+  scaledDimensions,
+  dedupeSkuEntries,
+  buildGoodsSkuImageFileName
 } from '../lib/goods.js';
 import { fetchBytes } from '../lib/remote.js';
 import { buildZip, splitZipEntries, MAX_ZIP_BYTES } from '../lib/zip.js';
@@ -46,6 +48,10 @@ const STATUS_ID = 'xhs-enhanced-goods-status';
 const FORMAT_ID = 'xhs-enhanced-goods-format';
 const DECOR_ID = 'xhs-enhanced-goods-decorations';
 const COMPRESS_ID = 'xhs-enhanced-goods-compress-main';
+const SKU_ID = 'xhs-enhanced-goods-sku';
+// 页面「选规格」接口返回的 SKU 预览图通过注入的 main-world 钩子捕获。
+const SKU_HOOK_ATTR = 'data-xhs-enhanced-sku-hook';
+const SKU_MSG = 'xhs-enhanced:sku-variant-data';
 const TITLE_TEXT = '📷 商品高清图下载';
 const COUNT_EMPTY = '未扫描';
 const COUNT_NONE = '未发现小红书商品图片';
@@ -59,6 +65,9 @@ let downloadButton = null;
 let formatSelect = null;
 let decorToggle = null;
 let compressToggle = null;
+let skuToggle = null;
+let pendingSkuResolve = null;
+let skuMessageBound = false;
 let observer = null;
 let rescanTimer = null;
 let autoScanTimer = null;
@@ -66,6 +75,7 @@ let currentImages = [];
 let includeDecorations = false;
 let formatMode = 'png';
 let compressMainEnabled = true; // 主图压缩到 3MB 以内（默认开，可关）
+let skuEnabled = true; // 下载时抓取 SKU 规格图（默认开，可关）
 let inFlight = false;
 
 function utf8Bytes(text) {
@@ -89,7 +99,7 @@ function setStatus(message) {
 
 function formatSectionCounts(counts) {
   const parts = [];
-  for (const section of ['main', 'detail', 'other']) {
+  for (const section of ['main', 'detail', 'sku', 'other']) {
     const n = counts[section] || 0;
     if (n > 0) parts.push(GOODS_SECTION_LABELS[section] + ' ' + n);
   }
@@ -259,6 +269,135 @@ async function compressGoodsImageToLimit(bytes) {
   return blob || bestBlob;
 }
 
+// ---- SKU 规格图 -----------------------------------------------------------
+// 选规格面板每次打开都会请求 /toc/variant，响应里 template_data[] 同时带
+// contentE1.variants[0].value（规格名）与 headerV4.previewImage（该规格预览图）。
+// 页面自身带 x-s/x-t 签名，后台无法直接请求，所以在页面 main world 注入一个
+// 轻量钩子捕获该响应，再用 postMessage 回传给 isolated world 的 content script。
+function installSkuNetworkHook() {
+  const doc = ROOT.document;
+  if (!doc || !doc.documentElement || doc.documentElement.hasAttribute(SKU_HOOK_ATTR)) return;
+  try {
+    doc.documentElement.setAttribute(SKU_HOOK_ATTR, '1');
+    const script = doc.createElement('script');
+    script.textContent = `(function(){
+  var MSG = ${JSON.stringify(SKU_MSG)};
+  function send(body){ try { window.postMessage({__xhsEnhancedSku:true, body:body}, '*'); } catch(e){} }
+  function watch(xhr){
+    try {
+      xhr.addEventListener('load', function(){
+        try {
+          var u = String(this.__xhsSkuUrl || this.responseURL || '');
+          if (u.indexOf('/toc/variant') < 0) return;
+          var b = this.responseText;
+          if (b) send(b);
+        } catch(e){}
+      });
+    } catch(e){}
+  }
+  var XhrCtor = window['XML' + 'HttpRequest'];
+  var Open = XhrCtor.prototype.open;
+  XhrCtor.prototype.open = function(method, url){
+    try { if (String(url||'').indexOf('/toc/variant') >= 0) this.__xhsSkuUrl = String(url); } catch(e){}
+    try { watch(this); } catch(e){}
+    return Open.apply(this, arguments);
+  };
+  var NativeFetch = window.fetch;
+  if (typeof NativeFetch === 'function') {
+    window.fetch = function(input, init){
+      var p = NativeFetch.apply(this, arguments);
+      try {
+        var u = String((input && input.url) || input || '');
+        if (u.indexOf('/toc/variant') >= 0) {
+          p.then(function(r){ return r.clone().text().then(send); }).catch(function(){});
+        }
+      } catch(e){}
+      return p;
+    };
+  }
+})();`;
+    (doc.head || doc.documentElement).appendChild(script);
+  } catch (_) {
+    // Injection blocked (unusual CSP): SKU collection degrades to the current-preview fallback.
+  }
+}
+
+function onSkuMessage(event) {
+  const data = event && event.data;
+  if (!data || data.__xhsEnhancedSku !== true || typeof data.body !== 'string') return;
+  if (!pendingSkuResolve) return;
+  const resolve = pendingSkuResolve;
+  pendingSkuResolve = null;
+  resolve(data.body);
+}
+
+function waitForSkuData(timeoutMs) {
+  return new Promise(resolve => {
+    const timer = ROOT.setTimeout(() => {
+      if (pendingSkuResolve) {
+        pendingSkuResolve = null;
+        resolve('');
+      }
+    }, timeoutMs);
+    pendingSkuResolve = body => {
+      ROOT.clearTimeout(timer);
+      resolve(body);
+    };
+  });
+}
+
+function parseSkuVariantResponse(body) {
+  let data;
+  try { data = JSON.parse(String(body || '')); } catch (_) { return []; }
+  const templates = data && data.data && data.data.template_data;
+  if (!Array.isArray(templates)) return [];
+  const out = [];
+  for (const item of templates) {
+    const variants = item && item.contentE1 && item.contentE1.variants;
+    const value = Array.isArray(variants) && variants[0] ? variants[0].value : null;
+    const url = item && item.headerV4 && item.headerV4.previewImage;
+    if (value && url) out.push({ url, section: 'sku', skuName: value });
+  }
+  return dedupeSkuEntries(out);
+}
+
+function closeSkuPanel(doc) {
+  try {
+    const zoom = doc.querySelector('img[data-action="zoom"]');
+    if (!zoom) return;
+    let root = zoom.parentElement;
+    while (root && root !== doc.body && !/数量|加入购物车/.test(String(root.textContent || ''))) {
+      root = root.parentElement;
+    }
+    const close = root && root.querySelector('svg[width="14"][height="14"]');
+    if (close && close.parentElement) close.parentElement.click();
+  } catch (_) {
+    /* never let panel cleanup break the download */
+  }
+}
+
+async function collectSkuVariants() {
+  const doc = ROOT.document;
+  if (!doc) return [];
+  const anchor = doc.querySelector('p.selected-text');
+  if (!anchor || typeof anchor.click !== 'function') return []; // 无 SKU 选择器
+  const selectedName = normalizeSpace(anchor.textContent || '').slice(0, 60);
+  // 若规格面板已经打开，先关掉再重新点开，确保页面会发一个新的签名请求供钩子捕获。
+  closeSkuPanel(doc);
+  const captured = waitForSkuData(4000);
+  try { anchor.click(); } catch (_) { /* ignore */ }
+  let body = '';
+  try { body = await captured; } catch (_) { /* ignore */ }
+  const entries = body ? parseSkuVariantResponse(body) : [];
+  // 钩子没抓到时至少保留当前选中规格的预览图，避免 SKU 功能完全落空。
+  if (!entries.length) {
+    const zoom = doc.querySelector('img[data-action="zoom"]');
+    if (zoom && zoom.src) entries.push(...dedupeSkuEntries([{ url: zoom.src, section: 'sku', skuName: selectedName || '规格' }]));
+  }
+  closeSkuPanel(doc);
+  return entries;
+}
+
 function mapWithConcurrencyLocal(items, limit, worker) {
   const list = Array.isArray(items) ? items : [];
   const lanes = [];
@@ -284,11 +423,30 @@ function mapWithConcurrencyLocal(items, limit, worker) {
 function onDownload() {
   if (inFlight) return;
   const doc = ROOT.document;
-  const images = currentImages.length ? currentImages.slice() : computeImages(doc, { includeDecorations });
-  if (!images.length) {
-    setStatus(COUNT_NONE + '，请先扫描');
+  const base = currentImages.length ? currentImages.slice() : computeImages(doc, { includeDecorations });
+  const finish = images => {
+    if (!images.length) {
+      setBusy(false);
+      setStatus(COUNT_NONE + '，请先扫描');
+      return;
+    }
+    startPacking(images, doc);
+  };
+  if (!skuEnabled) {
+    finish(base);
     return;
   }
+  // SKU 图不是常驻 DOM：打开规格面板触发页面自己的签名接口，捕获预览图后再打包。
+  setBusy(true);
+  setStatus('正在读取 SKU 规格图…');
+  collectSkuVariants().then(skuEntries => {
+    const images = base.concat(skuEntries);
+    if (skuEntries.length) setStatus('已读取 ' + skuEntries.length + ' 个 SKU 规格，开始下载…');
+    finish(images);
+  }).catch(() => finish(base));
+}
+
+function startPacking(images, doc) {
   const goodsId = getGoodsIdFromHref(ROOT.location ? ROOT.location.pathname : '') || 'goods';
   const pageUrl = ROOT.location ? String(ROOT.location.href || '') : '';
   const title = getGoodsTitleFromDocument(doc);
@@ -301,6 +459,7 @@ function onDownload() {
   mapWithConcurrencyLocal(images, 3, (item, index) => {
     const url = item.url || item;
     const section = item.section || 'other';
+    const skuName = item.skuName || '';
     const hd = toHDGoodsUrl(url, formatMode);
     return fetchBytes(hd, { timeout: 30000 }).then(first => {
       let res = first;
@@ -309,16 +468,16 @@ function onDownload() {
           return fetchBytes(url, { timeout: 30000 }).then(retry => {
             done += 1;
             setStatus('正在下载 ' + done + '/' + total + '…');
-            return packEntry(url, retry, section);
+            return packEntry(url, retry, section, skuName);
           });
         }
         done += 1;
         setStatus('正在下载 ' + done + '/' + total + '…');
-        return packEntry(url, null, section);
+        return packEntry(url, null, section, skuName);
       }
       done += 1;
       setStatus('正在下载 ' + done + '/' + total + '…');
-      return packEntry(url, res, section);
+      return packEntry(url, res, section, skuName);
     });
   }).then(packed => {
     const fetched = [];
@@ -331,10 +490,21 @@ function onDownload() {
       setStatus('全部 ' + total + ' 张图片下载失败');
       return;
     }
-    // Per-section numbering: 主图_01.., 详情图_01.., 其它_01...
-    const sectionSeq = { main: 0, detail: 0, other: 0 };
+    // Per-section numbering: 主图_01.., 详情图_01.., SKU_<规格名>_01.., 其它_01..
+    const sectionSeq = { main: 0, detail: 0, sku: 0, other: 0 };
+    const skuSeqByName = new Map();
+    const skuManifest = [];
     const entries = fetched.map(entry => {
-      const section = entry.section === 'main' || entry.section === 'detail' ? entry.section : 'other';
+      const section = entry.section === 'main' || entry.section === 'detail' || entry.section === 'sku'
+        ? entry.section : 'other';
+      if (section === 'sku') {
+        const skuName = entry.skuName || '规格';
+        const seq = skuSeqByName.get(skuName) || 0;
+        skuSeqByName.set(skuName, seq + 1);
+        const name = buildGoodsSkuImageFileName(skuName, seq, entry.ext);
+        skuManifest.push({ name: skuName, file: name });
+        return { name, bytes: entry.bytes };
+      }
       const seq = sectionSeq[section] || 0;
       sectionSeq[section] = seq + 1;
       return { name: buildGoodsImageFileName(seq, entry.ext, section), bytes: entry.bytes };
@@ -344,7 +514,8 @@ function onDownload() {
     const compressFailedCount = fetched.filter(entry => entry.compressFailed).length;
     const oversizeMainCount = fetched.filter(entry => entry.section === 'main' && entry.oversize).length;
     const info = buildGoodsInfoText({
-      pageUrl, goodsId, title, scannedAt, count: entries.length, mode: formatMode, sections: sectionCounts,
+      pageUrl, goodsId, title, scannedAt, count: entries.length, mode: formatMode,
+      sections: sectionCounts, skus: skuManifest,
       compressMain: { enabled: compressMainEnabled, compressed: compressedCount, failed: compressFailedCount, oversize: oversizeMainCount }
     });
     entries.unshift({ name: '00_商品信息.txt', bytes: utf8Bytes(info) });
@@ -361,6 +532,8 @@ function onDownload() {
       setBusy(false);
       const details = [];
       if (failed) details.push('失败 ' + failed + ' 张');
+      const skuCount = fetched.filter(entry => entry.section === 'sku').length;
+      if (skuCount > 0) details.push('SKU 图 ' + skuCount + ' 张');
       if (compressedCount > 0) details.push('主图已压缩 ' + compressedCount + ' 张');
       if (oversizeMainCount > 0) details.push('主图 ' + oversizeMainCount + ' 张仍超过 3MB');
       setStatus('已下载 ' + (entries.length - 1) + ' 张图片' + (details.length ? '（' + details.join('；') + '）' : '') + '（zip 已保存）');
@@ -377,34 +550,30 @@ function onDownload() {
 // Pack one fetched image into a zip entry payload (name assigned later, per section).
 // Main images larger than 3MB are re-encoded (lower JPEG quality, then smaller
 // dimensions) when the panel's 主图压缩 switch is on.
-async function packEntry(url, res, section) {
+async function packEntry(url, res, section, skuName) {
   const bytes = res && res.ok && res.bytes && res.bytes.length ? res.bytes : null;
   if (!bytes) return { entry: null };
-  let ext = extForImage(bytes, res.contentType, url);
+  const ext = extForImage(bytes, res.contentType, url);
+  const common = { name: '', ext, section, skuName: skuName || '' };
   if (shouldCompressGoodsImage(section, bytes.length, compressMainEnabled)) {
     const blob = await compressGoodsImageToLimit(bytes);
     if (blob) {
       const buffer = await blob.arrayBuffer();
       const compressed = new Uint8Array(buffer);
       if (compressed.length && compressed.length <= GOODS_COMPRESS_MAX_BYTES) {
-        return { entry: { name: '', bytes: compressed, ext: 'jpg', section, compressed: true, oversize: false } };
+        return { entry: { ...common, bytes: compressed, ext: 'jpg', compressed: true, oversize: false } };
       }
       if (compressed.length && compressed.length < bytes.length) {
-        return { entry: { name: '', bytes: compressed, ext: 'jpg', section, compressed: true, oversize: true } };
+        return { entry: { ...common, bytes: compressed, ext: 'jpg', compressed: true, oversize: true } };
       }
     }
     // Decode/re-encode failed or produced a larger file: keep the original
     // bytes and mark it so the summary can report it.
     return {
-      entry: {
-        name: '', bytes, ext, section,
-        compressed: false,
-        oversize: true,
-        compressFailed: true
-      }
+      entry: { ...common, bytes, compressed: false, oversize: true, compressFailed: true }
     };
   }
-  return { entry: { name: '', bytes, ext, section } };
+  return { entry: { ...common, bytes } };
 }
 
 function onDecorationsToggle() {
@@ -416,6 +585,11 @@ function onDecorationsToggle() {
 function onCompressToggle() {
   compressMainEnabled = Boolean(compressToggle && compressToggle.checked);
   setStatus(compressMainEnabled ? '主图将压缩到 3MB 以内' : '主图不压缩（保留原始字节）');
+}
+
+function onSkuToggle() {
+  skuEnabled = Boolean(skuToggle && skuToggle.checked);
+  setStatus(skuEnabled ? '将抓取 SKU 规格图（下载时展开规格面板）' : '不抓取 SKU 规格图');
 }
 
 function onFormatChange() {
@@ -497,6 +671,17 @@ function buildPanel() {
   compressLabel.appendChild(doc.createTextNode('主图大小压缩到 3MB 以内'));
   element.appendChild(compressLabel);
 
+  const skuLabel = doc.createElement('label');
+  skuLabel.className = 'xhs-enhanced-goods-check';
+  skuToggle = doc.createElement('input');
+  skuToggle.type = 'checkbox';
+  skuToggle.id = SKU_ID;
+  skuToggle.checked = skuEnabled;
+  skuToggle.addEventListener('change', onSkuToggle);
+  skuLabel.appendChild(skuToggle);
+  skuLabel.appendChild(doc.createTextNode('包含 SKU 规格图（每个规格单独一张）'));
+  element.appendChild(skuLabel);
+
   countNode = doc.createElement('p');
   countNode.id = COUNT_ID;
   countNode.className = 'xhs-enhanced-goods-count';
@@ -542,6 +727,11 @@ export function ensureGoodsPanel() {
   removeGoodsPanel();
   panel = buildPanel();
   ROOT.document.body.appendChild(panel);
+  installSkuNetworkHook();
+  if (!skuMessageBound && typeof ROOT.addEventListener === 'function') {
+    ROOT.addEventListener('message', onSkuMessage);
+    skuMessageBound = true;
+  }
   bindObserver();
   // CSR hydration: scan once shortly after load; the observer covers later
   // lazy-loaded gallery rows.
@@ -569,6 +759,8 @@ export function removeGoodsPanel() {
   formatSelect = null;
   decorToggle = null;
   compressToggle = null;
+  skuToggle = null;
+  pendingSkuResolve = null;
   currentImages = [];
   inFlight = false;
 }

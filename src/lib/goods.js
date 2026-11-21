@@ -7,6 +7,7 @@
 //   4. 下载产物为单个 zip（含 info.txt 商品信息），而不是逐张触发下载；
 //   5. 高清格式可选：高清 PNG（默认）/ 原始格式 / JPEG q90。
 import { normalizeSpace } from './text.js';
+import { sanitizeFileName } from './zip.js';
 
 export const GOODS_ROUTE_RE = /^\/goods-detail\/[^/?#]+/;
 
@@ -24,11 +25,10 @@ const DECORATION_RE = /(avatar|emoji|favicon|logo|spacer|placeholder|1x1)/i;
 const TRAILING_JUNK_RE = /(?:[.,;:!?>)]+|&[a-z#0-9]+;)$/i;
 const URL_TEXT_RE = /https?:\/\/[^\s"'<>()\\]+/g;
 
-// 图片分区：主图轮播（layout-swiper / layout-slide / swiper / scroll-x 等字面量
-// 类名）、图文详情（graphic-detail 字面量类名）、其余（推荐好物/种草笔记等，
-// 页面哈希类名，无法稳定归属）。用于 zip 内文件名区分：主图_01.png / 详情图_01.png / 其它_01.png。
-export const GOODS_SECTIONS = Object.freeze(['main', 'detail', 'other']);
-export const GOODS_SECTION_LABELS = Object.freeze({ main: '主图', detail: '详情图', other: '其它' });
+// 图片分区：主图轮播、图文详情、SKU 规格图（选规格时预览图随规格变化）、其余。
+// 用于 zip 内文件名区分：主图_01.png / 详情图_01.png / SKU_<规格名>_01.jpg / 其它_01.png。
+export const GOODS_SECTIONS = Object.freeze(['main', 'detail', 'sku', 'other']);
+export const GOODS_SECTION_LABELS = Object.freeze({ main: '主图', detail: '详情图', sku: 'SKU 图', other: '其它' });
 const SECTION_DETAIL_SELECTOR = '[class*="graphic-detail"]';
 const SECTION_MAIN_SELECTOR = '[class*="layout-swiper"], [class*="layout-slide"], [class*="swiper"], [class*="scroll-x"], [class*="carousel-container"], [class*="carousel-image"], [class*="swiper-area"]';
 const DOCUMENT_POSITION_FOLLOWING = 4;
@@ -50,10 +50,10 @@ export function classifyGoodsSection(node, doc) {
 }
 
 export function countGoodsSections(entries) {
-  const counts = { main: 0, detail: 0, other: 0 };
+  const counts = { main: 0, detail: 0, sku: 0, other: 0 };
   for (const entry of entries || []) {
     const section = entry && entry.section;
-    if (section === 'main' || section === 'detail') counts[section] += 1;
+    if (section === 'main' || section === 'detail' || section === 'sku') counts[section] += 1;
     else counts.other += 1;
   }
   return counts;
@@ -200,7 +200,24 @@ export function dedupeGoodsImages(urls) {
 }
 
 export function normalizeGoodsSection(value) {
-  return value === 'main' || value === 'detail' ? value : 'other';
+  return value === 'main' || value === 'detail' || value === 'sku' ? value : 'other';
+}
+
+// SKU 预览图来自页面「选规格」接口；同一规格名 + 同一底层图片的重复项折叠，
+// 但故意不与主图/详情图去重——用户要的是每个规格单独一张文件。
+export function dedupeSkuEntries(entries) {
+  const seen = new Set();
+  const out = [];
+  for (const entry of entries || []) {
+    const skuName = normalizeSpace(entry && entry.skuName).slice(0, 60);
+    const url = String((entry && entry.url) || '').trim();
+    if (!skuName || !url || !looksLikeGoodsImageUrl(url, {})) continue;
+    const key = skuName + '|' + canonicalGoodsImageKey(url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ url, section: 'sku', skuName });
+  }
+  return out;
 }
 
 // Full pipeline: extract → filter → dedupe. DOM-derived candidates carry a
@@ -301,6 +318,14 @@ export function buildGoodsImageFileName(index, ext, section) {
   return prefix ? `${prefix}_${seq}.${safeExt}` : `${seq}.${safeExt}`;
 }
 
+// `SKU_<规格名>_<序号>.<ext>`，规格名保留中文、过滤文件系统非法字符。
+export function buildGoodsSkuImageFileName(skuName, index, ext) {
+  const seq = String((Number(index) || 0) + 1).padStart(2, '0');
+  const safeExt = String(ext || 'jpg').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'jpg';
+  const safeName = sanitizeFileName(skuName || '', '规格', 40) || '规格';
+  return `SKU_${safeName}_${seq}.${safeExt}`;
+}
+
 // info.txt 随压缩包一起导出的商品元信息。
 export function buildGoodsInfoText(meta) {
   const m = meta || {};
@@ -317,7 +342,7 @@ export function buildGoodsInfoText(meta) {
   const sections = m.sections && typeof m.sections === 'object' ? m.sections : null;
   if (sections) {
     const parts = [];
-    for (const section of ['main', 'detail', 'other']) {
+    for (const section of ['main', 'detail', 'sku', 'other']) {
       const n = Number(sections[section]) || 0;
       if (n > 0) parts.push(GOODS_SECTION_LABELS[section] + ' ' + n + ' 张');
     }
@@ -325,6 +350,15 @@ export function buildGoodsInfoText(meta) {
       const at = lines.findIndex(line => line.indexOf('图片数量：') === 0);
       lines.splice(at + 1, 0, '分区：' + parts.join('，'));
     }
+  }
+  const skus = Array.isArray(m.skus) ? m.skus : null;
+  if (skus && skus.length) {
+    const sourceAt = lines.findIndex(line => line.indexOf('来源：') === 0);
+    const skuLines = ['SKU 规格：'];
+    for (const sku of skus) {
+      skuLines.push('  ' + String(sku && sku.name || '') + ' → ' + String(sku && sku.file || ''));
+    }
+    lines.splice(sourceAt >= 0 ? sourceAt : lines.length, 0, ...skuLines);
   }
   const compress = m.compressMain && typeof m.compressMain === 'object' ? m.compressMain : null;
   if (compress) {

@@ -1,0 +1,69 @@
+- generic [active] [ref=e1]:
+  - heading "Browser harness" [level=1] [ref=e2]
+  - list [ref=e3]:
+    - listitem [ref=e4]: "PASS: test API installed"
+    - listitem [ref=e5]: "PASS: strict boundary: 100 is not highlighted"
+    - listitem [ref=e6]: "PASS: strict boundary: 101 card highlighted"
+    - listitem [ref=e7]: "PASS: like node highlighted with card"
+    - listitem [ref=e8]: "PASS: supported count format: comma"
+    - listitem [ref=e9]: "PASS: supported count format: wan"
+    - listitem [ref=e10]: "PASS: supported count format: w"
+    - listitem [ref=e11]: "PASS: supported count format: k"
+    - listitem [ref=e12]: "PASS: malformed counts fail conservatively"
+    - listitem [ref=e13]: "PASS: unreliable card ignored"
+    - listitem [ref=e14]: "PASS: no publication-time labels are generated"
+    - listitem [ref=e15]: "PASS: single global style"
+    - listitem [ref=e16]: "PASS: search card with two note anchors receives a card-actions container"
+    - listitem [ref=e17]: "PASS: search dual-anchor card has exactly one copy-link button"
+    - listitem [ref=e18]: "PASS: search dual-anchor card has exactly one copy-cover button"
+    - listitem [ref=e19]: "PASS: search dual-anchor card has exactly one download-cover button"
+    - listitem [ref=e20]: "PASS: search dual-anchor card has exactly one save-library button"
+    - listitem [ref=e21]: "PASS: search dual-anchor card download-cover button label"
+  - main [ref=e23]:
+    - main [ref=e24]:
+      - generic [ref=e25]:
+        - link "P1" [ref=e26] [cursor=pointer]:
+          - /url: /discovery/item/p1
+        - text: 100粉丝 9999
+        - generic:
+          - button "复制链接"
+          - button "复制封面"
+          - button "下载封面"
+          - button "保存入库"
+        - checkbox "选择这篇笔记" [ref=e27] [cursor=pointer]: ✓
+      - generic [ref=e28]:
+        - link "P2" [ref=e29] [cursor=pointer]:
+          - /url: /explore/p2?xsec_token=hrefTokenP2&xsec_source=pc_feed
+        - text: "101"
+        - generic [ref=e30]:
+          - button "复制链接" [ref=e31] [cursor=pointer]
+          - button "复制封面" [ref=e32] [cursor=pointer]
+          - button "下载封面" [ref=e33] [cursor=pointer]
+          - button "保存入库" [ref=e34] [cursor=pointer]
+        - checkbox "选择这篇笔记" [ref=e35] [cursor=pointer]: ✓
+      - generic [ref=e36]:
+        - link "P3" [ref=e37] [cursor=pointer]:
+          - /url: /discovery/item/p3
+        - text: 120注册于 2020-01-01
+        - generic [ref=e38]:
+          - button "复制链接" [ref=e39] [cursor=pointer]
+          - button "复制封面" [ref=e40] [cursor=pointer]
+          - button "下载封面" [ref=e41] [cursor=pointer]
+          - button "保存入库" [ref=e42] [cursor=pointer]
+        - checkbox "选择这篇笔记" [ref=e43] [cursor=pointer]: ✓
+  - generic [ref=e44]:
+    - button "上一条热门笔记" [ref=e45] [cursor=pointer]
+    - button "下一条热门笔记" [ref=e46] [cursor=pointer]
+    - button "只显示热门" [ref=e47] [cursor=pointer]
+  - button "打开扩展选项页（热门阈值、内容库设置）" [ref=e48] [cursor=pointer]: ⚙ 设置
+  - button "本页全部入库" [ref=e49] [cursor=pointer]
+  - toolbar "批量下载已选笔记的封面" [ref=e50]:
+    - generic [ref=e51]: 已选 0 篇
+    - button "全选已加载" [ref=e52] [cursor=pointer]
+    - button "连续勾选" [ref=e53] [cursor=pointer]
+    - button "清空" [ref=e54] [cursor=pointer]
+    - group "下载范围" [ref=e55]:
+      - button "封面" [ref=e56] [cursor=pointer]
+      - button "内图" [ref=e57] [cursor=pointer]
+      - button "全部" [pressed] [ref=e58] [cursor=pointer]
+    - button "下载已选" [ref=e59] [cursor=pointer]

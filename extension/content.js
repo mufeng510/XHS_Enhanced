@@ -1646,8 +1646,8 @@
   var DECORATION_RE = /(avatar|emoji|favicon|logo|spacer|placeholder|1x1)/i;
   var TRAILING_JUNK_RE = /(?:[.,;:!?>)]+|&[a-z#0-9]+;)$/i;
   var URL_TEXT_RE = /https?:\/\/[^\s"'<>()\\]+/g;
-  var GOODS_SECTIONS = Object.freeze(["main", "detail", "other"]);
-  var GOODS_SECTION_LABELS = Object.freeze({ main: "\u4E3B\u56FE", detail: "\u8BE6\u60C5\u56FE", other: "\u5176\u5B83" });
+  var GOODS_SECTIONS = Object.freeze(["main", "detail", "sku", "other"]);
+  var GOODS_SECTION_LABELS = Object.freeze({ main: "\u4E3B\u56FE", detail: "\u8BE6\u60C5\u56FE", sku: "SKU \u56FE", other: "\u5176\u5B83" });
   var SECTION_DETAIL_SELECTOR = '[class*="graphic-detail"]';
   var SECTION_MAIN_SELECTOR = '[class*="layout-swiper"], [class*="layout-slide"], [class*="swiper"], [class*="scroll-x"], [class*="carousel-container"], [class*="carousel-image"], [class*="swiper-area"]';
   var DOCUMENT_POSITION_FOLLOWING = 4;
@@ -1662,10 +1662,10 @@
     return beforeDetail ? "main" : "other";
   }
   function countGoodsSections(entries) {
-    const counts = { main: 0, detail: 0, other: 0 };
+    const counts = { main: 0, detail: 0, sku: 0, other: 0 };
     for (const entry of entries || []) {
       const section = entry && entry.section;
-      if (section === "main" || section === "detail") counts[section] += 1;
+      if (section === "main" || section === "detail" || section === "sku") counts[section] += 1;
       else counts.other += 1;
     }
     return counts;
@@ -1787,7 +1787,21 @@
     return order.map((key) => bestByKey.get(key));
   }
   function normalizeGoodsSection(value) {
-    return value === "main" || value === "detail" ? value : "other";
+    return value === "main" || value === "detail" || value === "sku" ? value : "other";
+  }
+  function dedupeSkuEntries(entries) {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const entry of entries || []) {
+      const skuName = normalizeSpace(entry && entry.skuName).slice(0, 60);
+      const url = String(entry && entry.url || "").trim();
+      if (!skuName || !url || !looksLikeGoodsImageUrl(url, {})) continue;
+      const key = skuName + "|" + canonicalGoodsImageKey(url);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ url, section: "sku", skuName });
+    }
+    return out;
   }
   function collectGoodsImageEntries(domEntries, textUrls, options) {
     const merged = [];
@@ -1865,6 +1879,12 @@
     const prefix = section === "main" ? "\u4E3B\u56FE" : section === "detail" ? "\u8BE6\u60C5\u56FE" : section ? "\u5176\u5B83" : "";
     return prefix ? `${prefix}_${seq}.${safeExt}` : `${seq}.${safeExt}`;
   }
+  function buildGoodsSkuImageFileName(skuName, index, ext) {
+    const seq = String((Number(index) || 0) + 1).padStart(2, "0");
+    const safeExt = String(ext || "jpg").replace(/[^a-z0-9]/gi, "").toLowerCase() || "jpg";
+    const safeName = sanitizeFileName(skuName || "", "\u89C4\u683C", 40) || "\u89C4\u683C";
+    return `SKU_${safeName}_${seq}.${safeExt}`;
+  }
   function buildGoodsInfoText(meta) {
     const m = meta || {};
     const lines = [
@@ -1880,7 +1900,7 @@
     const sections = m.sections && typeof m.sections === "object" ? m.sections : null;
     if (sections) {
       const parts = [];
-      for (const section of ["main", "detail", "other"]) {
+      for (const section of ["main", "detail", "sku", "other"]) {
         const n = Number(sections[section]) || 0;
         if (n > 0) parts.push(GOODS_SECTION_LABELS[section] + " " + n + " \u5F20");
       }
@@ -1888,6 +1908,15 @@
         const at = lines.findIndex((line) => line.indexOf("\u56FE\u7247\u6570\u91CF\uFF1A") === 0);
         lines.splice(at + 1, 0, "\u5206\u533A\uFF1A" + parts.join("\uFF0C"));
       }
+    }
+    const skus = Array.isArray(m.skus) ? m.skus : null;
+    if (skus && skus.length) {
+      const sourceAt = lines.findIndex((line) => line.indexOf("\u6765\u6E90\uFF1A") === 0);
+      const skuLines = ["SKU \u89C4\u683C\uFF1A"];
+      for (const sku of skus) {
+        skuLines.push("  " + String(sku && sku.name || "") + " \u2192 " + String(sku && sku.file || ""));
+      }
+      lines.splice(sourceAt >= 0 ? sourceAt : lines.length, 0, ...skuLines);
     }
     const compress = m.compressMain && typeof m.compressMain === "object" ? m.compressMain : null;
     if (compress) {
@@ -1920,6 +1949,9 @@
   var FORMAT_ID = "xhs-enhanced-goods-format";
   var DECOR_ID = "xhs-enhanced-goods-decorations";
   var COMPRESS_ID = "xhs-enhanced-goods-compress-main";
+  var SKU_ID = "xhs-enhanced-goods-sku";
+  var SKU_HOOK_ATTR = "data-xhs-enhanced-sku-hook";
+  var SKU_MSG = "xhs-enhanced:sku-variant-data";
   var TITLE_TEXT = "\u{1F4F7} \u5546\u54C1\u9AD8\u6E05\u56FE\u4E0B\u8F7D";
   var COUNT_EMPTY = "\u672A\u626B\u63CF";
   var COUNT_NONE = "\u672A\u53D1\u73B0\u5C0F\u7EA2\u4E66\u5546\u54C1\u56FE\u7247";
@@ -1932,6 +1964,9 @@
   var formatSelect = null;
   var decorToggle = null;
   var compressToggle = null;
+  var skuToggle = null;
+  var pendingSkuResolve = null;
+  var skuMessageBound = false;
   var observer = null;
   var rescanTimer = null;
   var autoScanTimer = null;
@@ -1939,6 +1974,7 @@
   var includeDecorations = false;
   var formatMode = "png";
   var compressMainEnabled = true;
+  var skuEnabled = true;
   var inFlight = false;
   function utf8Bytes(text) {
     const source = String(text == null ? "" : text);
@@ -1962,7 +1998,7 @@
   }
   function formatSectionCounts(counts) {
     const parts = [];
-    for (const section of ["main", "detail", "other"]) {
+    for (const section of ["main", "detail", "sku", "other"]) {
       const n = counts[section] || 0;
       if (n > 0) parts.push(GOODS_SECTION_LABELS[section] + " " + n);
     }
@@ -2136,6 +2172,130 @@
     }
     return blob || bestBlob;
   }
+  function installSkuNetworkHook() {
+    const doc = ROOT.document;
+    if (!doc || !doc.documentElement || doc.documentElement.hasAttribute(SKU_HOOK_ATTR)) return;
+    try {
+      doc.documentElement.setAttribute(SKU_HOOK_ATTR, "1");
+      const script = doc.createElement("script");
+      script.textContent = `(function(){
+  var MSG = ${JSON.stringify(SKU_MSG)};
+  function send(body){ try { window.postMessage({__xhsEnhancedSku:true, body:body}, '*'); } catch(e){} }
+  function watch(xhr){
+    try {
+      xhr.addEventListener('load', function(){
+        try {
+          var u = String(this.__xhsSkuUrl || this.responseURL || '');
+          if (u.indexOf('/toc/variant') < 0) return;
+          var b = this.responseText;
+          if (b) send(b);
+        } catch(e){}
+      });
+    } catch(e){}
+  }
+  var XhrCtor = window['XML' + 'HttpRequest'];
+  var Open = XhrCtor.prototype.open;
+  XhrCtor.prototype.open = function(method, url){
+    try { if (String(url||'').indexOf('/toc/variant') >= 0) this.__xhsSkuUrl = String(url); } catch(e){}
+    try { watch(this); } catch(e){}
+    return Open.apply(this, arguments);
+  };
+  var NativeFetch = window.fetch;
+  if (typeof NativeFetch === 'function') {
+    window.fetch = function(input, init){
+      var p = NativeFetch.apply(this, arguments);
+      try {
+        var u = String((input && input.url) || input || '');
+        if (u.indexOf('/toc/variant') >= 0) {
+          p.then(function(r){ return r.clone().text().then(send); }).catch(function(){});
+        }
+      } catch(e){}
+      return p;
+    };
+  }
+})();`;
+      (doc.head || doc.documentElement).appendChild(script);
+    } catch (_) {
+    }
+  }
+  function onSkuMessage(event) {
+    const data = event && event.data;
+    if (!data || data.__xhsEnhancedSku !== true || typeof data.body !== "string") return;
+    if (!pendingSkuResolve) return;
+    const resolve = pendingSkuResolve;
+    pendingSkuResolve = null;
+    resolve(data.body);
+  }
+  function waitForSkuData(timeoutMs) {
+    return new Promise((resolve) => {
+      const timer = ROOT.setTimeout(() => {
+        if (pendingSkuResolve) {
+          pendingSkuResolve = null;
+          resolve("");
+        }
+      }, timeoutMs);
+      pendingSkuResolve = (body) => {
+        ROOT.clearTimeout(timer);
+        resolve(body);
+      };
+    });
+  }
+  function parseSkuVariantResponse(body) {
+    let data;
+    try {
+      data = JSON.parse(String(body || ""));
+    } catch (_) {
+      return [];
+    }
+    const templates = data && data.data && data.data.template_data;
+    if (!Array.isArray(templates)) return [];
+    const out = [];
+    for (const item of templates) {
+      const variants = item && item.contentE1 && item.contentE1.variants;
+      const value = Array.isArray(variants) && variants[0] ? variants[0].value : null;
+      const url = item && item.headerV4 && item.headerV4.previewImage;
+      if (value && url) out.push({ url, section: "sku", skuName: value });
+    }
+    return dedupeSkuEntries(out);
+  }
+  function closeSkuPanel(doc) {
+    try {
+      const zoom = doc.querySelector('img[data-action="zoom"]');
+      if (!zoom) return;
+      let root = zoom.parentElement;
+      while (root && root !== doc.body && !/数量|加入购物车/.test(String(root.textContent || ""))) {
+        root = root.parentElement;
+      }
+      const close = root && root.querySelector('svg[width="14"][height="14"]');
+      if (close && close.parentElement) close.parentElement.click();
+    } catch (_) {
+    }
+  }
+  async function collectSkuVariants() {
+    const doc = ROOT.document;
+    if (!doc) return [];
+    const anchor = doc.querySelector("p.selected-text");
+    if (!anchor || typeof anchor.click !== "function") return [];
+    const selectedName = normalizeSpace(anchor.textContent || "").slice(0, 60);
+    closeSkuPanel(doc);
+    const captured = waitForSkuData(4e3);
+    try {
+      anchor.click();
+    } catch (_) {
+    }
+    let body = "";
+    try {
+      body = await captured;
+    } catch (_) {
+    }
+    const entries = body ? parseSkuVariantResponse(body) : [];
+    if (!entries.length) {
+      const zoom = doc.querySelector('img[data-action="zoom"]');
+      if (zoom && zoom.src) entries.push(...dedupeSkuEntries([{ url: zoom.src, section: "sku", skuName: selectedName || "\u89C4\u683C" }]));
+    }
+    closeSkuPanel(doc);
+    return entries;
+  }
   function mapWithConcurrencyLocal(items, limit, worker) {
     const list = Array.isArray(items) ? items : [];
     const lanes = [];
@@ -2160,11 +2320,28 @@
   function onDownload() {
     if (inFlight) return;
     const doc = ROOT.document;
-    const images = currentImages.length ? currentImages.slice() : computeImages(doc, { includeDecorations });
-    if (!images.length) {
-      setStatus(COUNT_NONE + "\uFF0C\u8BF7\u5148\u626B\u63CF");
+    const base = currentImages.length ? currentImages.slice() : computeImages(doc, { includeDecorations });
+    const finish = (images) => {
+      if (!images.length) {
+        setBusy(false);
+        setStatus(COUNT_NONE + "\uFF0C\u8BF7\u5148\u626B\u63CF");
+        return;
+      }
+      startPacking(images, doc);
+    };
+    if (!skuEnabled) {
+      finish(base);
       return;
     }
+    setBusy(true);
+    setStatus("\u6B63\u5728\u8BFB\u53D6 SKU \u89C4\u683C\u56FE\u2026");
+    collectSkuVariants().then((skuEntries) => {
+      const images = base.concat(skuEntries);
+      if (skuEntries.length) setStatus("\u5DF2\u8BFB\u53D6 " + skuEntries.length + " \u4E2A SKU \u89C4\u683C\uFF0C\u5F00\u59CB\u4E0B\u8F7D\u2026");
+      finish(images);
+    }).catch(() => finish(base));
+  }
+  function startPacking(images, doc) {
     const goodsId = getGoodsIdFromHref(ROOT.location ? ROOT.location.pathname : "") || "goods";
     const pageUrl = ROOT.location ? String(ROOT.location.href || "") : "";
     const title = getGoodsTitleFromDocument(doc);
@@ -2177,6 +2354,7 @@
     mapWithConcurrencyLocal(images, 3, (item, index) => {
       const url = item.url || item;
       const section = item.section || "other";
+      const skuName = item.skuName || "";
       const hd = toHDGoodsUrl(url, formatMode);
       return fetchBytes(hd, { timeout: 3e4 }).then((first) => {
         let res = first;
@@ -2185,16 +2363,16 @@
             return fetchBytes(url, { timeout: 3e4 }).then((retry) => {
               done += 1;
               setStatus("\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + "\u2026");
-              return packEntry(url, retry, section);
+              return packEntry(url, retry, section, skuName);
             });
           }
           done += 1;
           setStatus("\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + "\u2026");
-          return packEntry(url, null, section);
+          return packEntry(url, null, section, skuName);
         }
         done += 1;
         setStatus("\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + "\u2026");
-        return packEntry(url, res, section);
+        return packEntry(url, res, section, skuName);
       });
     }).then((packed) => {
       const fetched = [];
@@ -2207,9 +2385,19 @@
         setStatus("\u5168\u90E8 " + total + " \u5F20\u56FE\u7247\u4E0B\u8F7D\u5931\u8D25");
         return;
       }
-      const sectionSeq = { main: 0, detail: 0, other: 0 };
+      const sectionSeq = { main: 0, detail: 0, sku: 0, other: 0 };
+      const skuSeqByName = /* @__PURE__ */ new Map();
+      const skuManifest = [];
       const entries = fetched.map((entry) => {
-        const section = entry.section === "main" || entry.section === "detail" ? entry.section : "other";
+        const section = entry.section === "main" || entry.section === "detail" || entry.section === "sku" ? entry.section : "other";
+        if (section === "sku") {
+          const skuName = entry.skuName || "\u89C4\u683C";
+          const seq2 = skuSeqByName.get(skuName) || 0;
+          skuSeqByName.set(skuName, seq2 + 1);
+          const name = buildGoodsSkuImageFileName(skuName, seq2, entry.ext);
+          skuManifest.push({ name: skuName, file: name });
+          return { name, bytes: entry.bytes };
+        }
         const seq = sectionSeq[section] || 0;
         sectionSeq[section] = seq + 1;
         return { name: buildGoodsImageFileName(seq, entry.ext, section), bytes: entry.bytes };
@@ -2226,6 +2414,7 @@
         count: entries.length,
         mode: formatMode,
         sections: sectionCounts,
+        skus: skuManifest,
         compressMain: { enabled: compressMainEnabled, compressed: compressedCount, failed: compressFailedCount, oversize: oversizeMainCount }
       });
       entries.unshift({ name: "00_\u5546\u54C1\u4FE1\u606F.txt", bytes: utf8Bytes(info) });
@@ -2242,6 +2431,8 @@
         setBusy(false);
         const details = [];
         if (failed) details.push("\u5931\u8D25 " + failed + " \u5F20");
+        const skuCount = fetched.filter((entry) => entry.section === "sku").length;
+        if (skuCount > 0) details.push("SKU \u56FE " + skuCount + " \u5F20");
         if (compressedCount > 0) details.push("\u4E3B\u56FE\u5DF2\u538B\u7F29 " + compressedCount + " \u5F20");
         if (oversizeMainCount > 0) details.push("\u4E3B\u56FE " + oversizeMainCount + " \u5F20\u4ECD\u8D85\u8FC7 3MB");
         setStatus("\u5DF2\u4E0B\u8F7D " + (entries.length - 1) + " \u5F20\u56FE\u7247" + (details.length ? "\uFF08" + details.join("\uFF1B") + "\uFF09" : "") + "\uFF08zip \u5DF2\u4FDD\u5B58\uFF09");
@@ -2254,35 +2445,28 @@
       setStatus("\u4E0B\u8F7D\u5931\u8D25");
     });
   }
-  async function packEntry(url, res, section) {
+  async function packEntry(url, res, section, skuName) {
     const bytes = res && res.ok && res.bytes && res.bytes.length ? res.bytes : null;
     if (!bytes) return { entry: null };
-    let ext = extForImage(bytes, res.contentType, url);
+    const ext = extForImage(bytes, res.contentType, url);
+    const common = { name: "", ext, section, skuName: skuName || "" };
     if (shouldCompressGoodsImage(section, bytes.length, compressMainEnabled)) {
       const blob = await compressGoodsImageToLimit(bytes);
       if (blob) {
         const buffer = await blob.arrayBuffer();
         const compressed = new Uint8Array(buffer);
         if (compressed.length && compressed.length <= GOODS_COMPRESS_MAX_BYTES) {
-          return { entry: { name: "", bytes: compressed, ext: "jpg", section, compressed: true, oversize: false } };
+          return { entry: { ...common, bytes: compressed, ext: "jpg", compressed: true, oversize: false } };
         }
         if (compressed.length && compressed.length < bytes.length) {
-          return { entry: { name: "", bytes: compressed, ext: "jpg", section, compressed: true, oversize: true } };
+          return { entry: { ...common, bytes: compressed, ext: "jpg", compressed: true, oversize: true } };
         }
       }
       return {
-        entry: {
-          name: "",
-          bytes,
-          ext,
-          section,
-          compressed: false,
-          oversize: true,
-          compressFailed: true
-        }
+        entry: { ...common, bytes, compressed: false, oversize: true, compressFailed: true }
       };
     }
-    return { entry: { name: "", bytes, ext, section } };
+    return { entry: { ...common, bytes } };
   }
   function onDecorationsToggle() {
     includeDecorations = Boolean(decorToggle && decorToggle.checked);
@@ -2292,6 +2476,10 @@
   function onCompressToggle() {
     compressMainEnabled = Boolean(compressToggle && compressToggle.checked);
     setStatus(compressMainEnabled ? "\u4E3B\u56FE\u5C06\u538B\u7F29\u5230 3MB \u4EE5\u5185" : "\u4E3B\u56FE\u4E0D\u538B\u7F29\uFF08\u4FDD\u7559\u539F\u59CB\u5B57\u8282\uFF09");
+  }
+  function onSkuToggle() {
+    skuEnabled = Boolean(skuToggle && skuToggle.checked);
+    setStatus(skuEnabled ? "\u5C06\u6293\u53D6 SKU \u89C4\u683C\u56FE\uFF08\u4E0B\u8F7D\u65F6\u5C55\u5F00\u89C4\u683C\u9762\u677F\uFF09" : "\u4E0D\u6293\u53D6 SKU \u89C4\u683C\u56FE");
   }
   function onFormatChange() {
     formatMode = formatSelect ? formatSelect.value : "png";
@@ -2364,6 +2552,16 @@
     compressLabel.appendChild(compressToggle);
     compressLabel.appendChild(doc.createTextNode("\u4E3B\u56FE\u5927\u5C0F\u538B\u7F29\u5230 3MB \u4EE5\u5185"));
     element.appendChild(compressLabel);
+    const skuLabel = doc.createElement("label");
+    skuLabel.className = "xhs-enhanced-goods-check";
+    skuToggle = doc.createElement("input");
+    skuToggle.type = "checkbox";
+    skuToggle.id = SKU_ID;
+    skuToggle.checked = skuEnabled;
+    skuToggle.addEventListener("change", onSkuToggle);
+    skuLabel.appendChild(skuToggle);
+    skuLabel.appendChild(doc.createTextNode("\u5305\u542B SKU \u89C4\u683C\u56FE\uFF08\u6BCF\u4E2A\u89C4\u683C\u5355\u72EC\u4E00\u5F20\uFF09"));
+    element.appendChild(skuLabel);
     countNode = doc.createElement("p");
     countNode.id = COUNT_ID;
     countNode.className = "xhs-enhanced-goods-count";
@@ -2404,6 +2602,11 @@
     removeGoodsPanel();
     panel = buildPanel();
     ROOT.document.body.appendChild(panel);
+    installSkuNetworkHook();
+    if (!skuMessageBound && typeof ROOT.addEventListener === "function") {
+      ROOT.addEventListener("message", onSkuMessage);
+      skuMessageBound = true;
+    }
     bindObserver();
     autoScanTimer = ROOT.setTimeout(() => {
       autoScanTimer = null;
@@ -2437,6 +2640,8 @@
     formatSelect = null;
     decorToggle = null;
     compressToggle = null;
+    skuToggle = null;
+    pendingSkuResolve = null;
     currentImages = [];
     inFlight = false;
   }
@@ -4102,6 +4307,8 @@
     SCALE_DOWN_FACTOR,
     SCALE_DOWN_MIN,
     scaledDimensions,
+    dedupeSkuEntries,
+    buildGoodsSkuImageFileName,
     buildDetailNoteUrl,
     resolveSaveUrlFromCard,
     cardNoteTargetId,

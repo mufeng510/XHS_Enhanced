@@ -83,7 +83,7 @@ for (const required of [
   'xhs-enhanced-save-library', 'xhs-enhanced-card--popular', 'xhs-enhanced-like--popular',
   'xhs-enhanced-goods-panel', 'xhs-enhanced-goods-scan', 'xhs-enhanced-goods-download',
   'xhs-enhanced-goods-format', 'xhs-enhanced-goods-count', 'xhs-enhanced-goods-status',
-  'xhs-enhanced-goods-compress-main'
+  'xhs-enhanced-goods-compress-main', 'xhs-enhanced-goods-sku'
 ]) {
   assert(content.includes(required), `bundle missing marker: ${required}`);
 }

@@ -105,7 +105,9 @@ import {
   GOODS_COMPRESS_MAX_BYTES,
   SCALE_DOWN_FACTOR,
   SCALE_DOWN_MIN,
-  scaledDimensions
+  scaledDimensions,
+  dedupeSkuEntries,
+  buildGoodsSkuImageFileName
 } from '../lib/goods.js';
 import { syncGoodsPanel, removeGoodsPanel, getGoodsImagesSnapshot } from './goods.js';
 
@@ -1820,6 +1822,7 @@ let preferenceChangeHandler = null;
     buildGoodsInfoText, getGoodsTitleFromDocument, GOODS_FORMAT_MODES,
     shouldCompressGoodsImage, JPEG_QUALITY_LADDER, GOODS_COMPRESS_MAX_BYTES,
     SCALE_DOWN_FACTOR, SCALE_DOWN_MIN, scaledDimensions,
+    dedupeSkuEntries, buildGoodsSkuImageFileName,
     buildDetailNoteUrl, resolveSaveUrlFromCard, cardNoteTargetId, resolveCardNoteLink,
     extractCardTitle, snapshotFromCard, onBatchDownload, mapWithConcurrency,
     buildZip, splitZipEntries, buildBatchZipFileName, buildNoteFolderName, buildImageFileName,
