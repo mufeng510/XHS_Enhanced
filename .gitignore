@@ -33,3 +33,6 @@ coverage/
 
 # Chrome-generated ruleset cache (created at extension load, never ship)
 extension/_metadata/
+
+# playwright-cli 浏览器调试产物（快照/下载）
+.playwright-cli/
