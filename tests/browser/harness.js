@@ -690,6 +690,65 @@
     await checkpoint();
   }
 
+  async function goodsSkuDomFallback() {
+    api.setTestRoute('/goods-detail/685d0fe3c16548001691655c');
+    await checkpoint();
+    assert(Boolean(document.getElementById('xhs-enhanced-goods-panel')), 'goods panel present for SKU fallback test');
+    sandbox.replaceChildren();
+    const NS = 'http://www.w3.org/2000/svg';
+    const A = 'https://mall-i1.xhscdn.com/arkgoods/1040g3ng326sbj0dkk4a05phq89shol8ue0tjuj8';
+    const B = 'https://mall-i1.xhscdn.com/arkgoods/1040g3ng3272jofqe6i705phq89shol8uid1b8og';
+    const buildModal = currentSrc => {
+      const modal = document.createElement('div');
+      modal.className = 'mock-sku-modal';
+      const qty = document.createElement('span'); qty.textContent = '数量'; modal.appendChild(qty);
+      const closeWrap = document.createElement('div');
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('width', '14'); svg.setAttribute('height', '14');
+      closeWrap.appendChild(svg);
+      closeWrap.addEventListener('click', () => modal.remove());
+      modal.appendChild(closeWrap);
+      const zoom = document.createElement('img');
+      zoom.setAttribute('data-action', 'zoom'); zoom.src = currentSrc;
+      modal.appendChild(zoom);
+      for (const [name, url] of [['红色款', A], ['蓝色款', B]]) {
+        const chip = document.createElement('span'); chip.textContent = name;
+        chip.addEventListener('click', () => { zoom.src = url; });
+        modal.appendChild(chip);
+      }
+      return modal;
+    };
+    const anchor = document.createElement('p');
+    anchor.className = 'selected-text'; anchor.textContent = '红色款';
+    anchor.addEventListener('click', () => {
+      if (!document.querySelector('.mock-sku-modal')) sandbox.appendChild(buildModal(A));
+    });
+    sandbox.appendChild(buildModal(A));
+    sandbox.appendChild(anchor);
+    // 不派发 postMessage：钩子拿不到数据，必须走 DOM 点击兜底。
+    const zipBlobs = [];
+    const originalCreateObjectURL = URL.createObjectURL.bind(URL);
+    const originalAnchorClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = blob => { zipBlobs.push(blob); return 'blob:xhs-enhanced-sku-fb-' + zipBlobs.length; };
+    HTMLAnchorElement.prototype.click = function noop() {};
+    document.getElementById('xhs-enhanced-goods-download').click();
+    const deadline = Date.now() + 18000;
+    while (Date.now() < deadline) {
+      const s = document.getElementById('xhs-enhanced-goods-status');
+      if (s && /已下载|失败/.test(s.textContent)) break;
+      await delay(50);
+    }
+    URL.createObjectURL = originalCreateObjectURL;
+    HTMLAnchorElement.prototype.click = originalAnchorClick;
+    const status = document.getElementById('xhs-enhanced-goods-status');
+    assert(status && /SKU 图 2 张/.test(status.textContent), 'DOM fallback yields both SKU specs', status ? status.textContent : '<none>');
+    assert(zipBlobs.length === 1, 'one zip produced by DOM fallback');
+    const text = new TextDecoder().decode(await zipBlobs[0].arrayBuffer());
+    assert(text.includes('SKU_红色款_01.jpg') && text.includes('SKU_蓝色款_01.jpg'), 'DOM fallback zip contains both per-spec files');
+    api.setTestRoute('/search_result');
+    await checkpoint();
+  }
+
   async function dynamicAndAttributes() {
     api.setTestRoute('/search_result');
     await useFixture('dynamic-source', '#dynamic-fixture');
@@ -939,6 +998,7 @@
       await batchLayoutFlatMode();
       await goodsDetailDownload();
       await goodsSkuImages();
+      await goodsSkuDomFallback();
       await dynamicAndAttributes();
       await jumpNavigation();
       await focusMode();

@@ -389,13 +389,81 @@ async function collectSkuVariants() {
   let body = '';
   try { body = await captured; } catch (_) { /* ignore */ }
   const entries = body ? parseSkuVariantResponse(body) : [];
-  // 钩子没抓到时至少保留当前选中规格的预览图，避免 SKU 功能完全落空。
-  if (!entries.length) {
-    const zoom = doc.querySelector('img[data-action="zoom"]');
-    if (zoom && zoom.src) entries.push(...dedupeSkuEntries([{ url: zoom.src, section: 'sku', skuName: selectedName || '规格' }]));
+  // 钩子因页面 SDK 覆盖 XHR/fetch、CSP 等原因没抓到（或只拿到当前规格）时，
+  // 退回 DOM 逐个点击规格选项——已真实页面验证可拿到全部规格。
+  if (entries.length < 2) {
+    const domEntries = await collectSkuFromDom(doc, anchor, selectedName);
+    if (domEntries.length > entries.length) {
+      entries.length = 0;
+      entries.push(...domEntries);
+    }
   }
   closeSkuPanel(doc);
   return entries;
+}
+
+// 兜底方案：网络钩子没抓到时，直接逐个点击规格选项并读取预览图 src。
+// 真实页面里「颜色分类」等类名是哈希值，不能依赖；这里只依赖稳定的结构：
+// 面板里的 img[data-action="zoom"] 预览图 + 无子元素的文本 span（按钮/svg 排除），
+// 点一下若预览图 URL 变了就说明这是个规格选项。
+const SKU_STATIC_LABELS = new Set([
+  '数量', '加入购物车', '立即购买', '颜色分类', '规格', '已选', '选择规格', '运费',
+  '7天无理由退货', '极速退款', '晚发必赔'
+]);
+
+function skuPreviewSrc(doc) {
+  const img = doc.querySelector('img[data-action="zoom"]');
+  return img && img.src ? img.src : '';
+}
+
+function waitForSkuPreview(doc, prevSrc, timeoutMs) {
+  return new Promise(resolve => {
+    const start = Date.now();
+    const tick = () => {
+      const src = skuPreviewSrc(doc);
+      if (src && src !== prevSrc) return resolve(src);
+      if (Date.now() - start >= timeoutMs) return resolve('');
+      ROOT.setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
+
+async function collectSkuFromDom(doc, anchor, selectedName) {
+  const out = [];
+  let preview = skuPreviewSrc(doc);
+  if (!preview) {
+    try { anchor.click(); } catch (_) { /* ignore */ }
+    preview = await waitForSkuPreview(doc, '', 2000);
+  }
+  if (!preview) return out;
+  if (selectedName) out.push({ url: preview, section: 'sku', skuName: selectedName });
+  let root = doc.querySelector('img[data-action="zoom"]');
+  if (!root) return dedupeSkuEntries(out);
+  root = root.parentElement;
+  while (root && root !== doc.body && !/数量|加入购物车/.test(String(root.textContent || ''))) {
+    root = root.parentElement;
+  }
+  if (!root || root === doc.body) return dedupeSkuEntries(out);
+  const chips = Array.from(root.querySelectorAll('*')).filter(el => {
+    if (el.children.length || el.closest('svg') || el.closest('button')) return false;
+    const text = normalizeSpace(el.textContent || '');
+    return text && text.length <= 40 && !/^[\d.]+$/.test(text) && !SKU_STATIC_LABELS.has(text);
+  });
+  for (const chip of chips) {
+    const name = normalizeSpace(chip.textContent || '').slice(0, 60);
+    if (!name) continue;
+    const before = skuPreviewSrc(doc);
+    try { chip.click(); } catch (_) { continue; }
+    const after = await waitForSkuPreview(doc, before, 800);
+    if (after) out.push({ url: after, section: 'sku', skuName: name });
+  }
+  // 还原用户原来选中的规格，避免下载后页面停在最后一个规格上。
+  if (selectedName) {
+    const original = chips.find(el => normalizeSpace(el.textContent || '') === selectedName);
+    if (original) { try { original.click(); } catch (_) { /* ignore */ } }
+  }
+  return dedupeSkuEntries(out);
 }
 
 function mapWithConcurrencyLocal(items, limit, worker) {

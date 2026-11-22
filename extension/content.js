@@ -2289,12 +2289,91 @@
     } catch (_) {
     }
     const entries = body ? parseSkuVariantResponse(body) : [];
-    if (!entries.length) {
-      const zoom = doc.querySelector('img[data-action="zoom"]');
-      if (zoom && zoom.src) entries.push(...dedupeSkuEntries([{ url: zoom.src, section: "sku", skuName: selectedName || "\u89C4\u683C" }]));
+    if (entries.length < 2) {
+      const domEntries = await collectSkuFromDom(doc, anchor, selectedName);
+      if (domEntries.length > entries.length) {
+        entries.length = 0;
+        entries.push(...domEntries);
+      }
     }
     closeSkuPanel(doc);
     return entries;
+  }
+  var SKU_STATIC_LABELS = /* @__PURE__ */ new Set([
+    "\u6570\u91CF",
+    "\u52A0\u5165\u8D2D\u7269\u8F66",
+    "\u7ACB\u5373\u8D2D\u4E70",
+    "\u989C\u8272\u5206\u7C7B",
+    "\u89C4\u683C",
+    "\u5DF2\u9009",
+    "\u9009\u62E9\u89C4\u683C",
+    "\u8FD0\u8D39",
+    "7\u5929\u65E0\u7406\u7531\u9000\u8D27",
+    "\u6781\u901F\u9000\u6B3E",
+    "\u665A\u53D1\u5FC5\u8D54"
+  ]);
+  function skuPreviewSrc(doc) {
+    const img = doc.querySelector('img[data-action="zoom"]');
+    return img && img.src ? img.src : "";
+  }
+  function waitForSkuPreview(doc, prevSrc, timeoutMs) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const tick = () => {
+        const src = skuPreviewSrc(doc);
+        if (src && src !== prevSrc) return resolve(src);
+        if (Date.now() - start >= timeoutMs) return resolve("");
+        ROOT.setTimeout(tick, 50);
+      };
+      tick();
+    });
+  }
+  async function collectSkuFromDom(doc, anchor, selectedName) {
+    const out = [];
+    let preview = skuPreviewSrc(doc);
+    if (!preview) {
+      try {
+        anchor.click();
+      } catch (_) {
+      }
+      preview = await waitForSkuPreview(doc, "", 2e3);
+    }
+    if (!preview) return out;
+    if (selectedName) out.push({ url: preview, section: "sku", skuName: selectedName });
+    let root = doc.querySelector('img[data-action="zoom"]');
+    if (!root) return dedupeSkuEntries(out);
+    root = root.parentElement;
+    while (root && root !== doc.body && !/数量|加入购物车/.test(String(root.textContent || ""))) {
+      root = root.parentElement;
+    }
+    if (!root || root === doc.body) return dedupeSkuEntries(out);
+    const chips = Array.from(root.querySelectorAll("*")).filter((el) => {
+      if (el.children.length || el.closest("svg") || el.closest("button")) return false;
+      const text = normalizeSpace(el.textContent || "");
+      return text && text.length <= 40 && !/^[\d.]+$/.test(text) && !SKU_STATIC_LABELS.has(text);
+    });
+    for (const chip of chips) {
+      const name = normalizeSpace(chip.textContent || "").slice(0, 60);
+      if (!name) continue;
+      const before = skuPreviewSrc(doc);
+      try {
+        chip.click();
+      } catch (_) {
+        continue;
+      }
+      const after = await waitForSkuPreview(doc, before, 800);
+      if (after) out.push({ url: after, section: "sku", skuName: name });
+    }
+    if (selectedName) {
+      const original = chips.find((el) => normalizeSpace(el.textContent || "") === selectedName);
+      if (original) {
+        try {
+          original.click();
+        } catch (_) {
+        }
+      }
+    }
+    return dedupeSkuEntries(out);
   }
   function mapWithConcurrencyLocal(items, limit, worker) {
     const list = Array.isArray(items) ? items : [];
