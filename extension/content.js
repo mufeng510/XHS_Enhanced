@@ -1671,7 +1671,7 @@
     return counts;
   }
   var GOODS_COMPRESS_MAX_BYTES = 3 * 1024 * 1024;
-  var JPEG_QUALITY_LADDER = Object.freeze([0.85, 0.75, 0.65, 0.55, 0.45]);
+  var JPEG_QUALITY_LADDER = Object.freeze([0.98, 0.95, 0.92, 0.88, 0.82, 0.75, 0.65, 0.55, 0.45]);
   var SCALE_DOWN_FACTOR = 0.85;
   var SCALE_DOWN_MIN = 0.35;
   function shouldCompressGoodsImage(section, byteLength, enabled) {
@@ -1951,7 +1951,7 @@
     addCompressLine("SKU \u56FE", m.compressSku);
     const stitched = Number(m.stitched) || 0;
     if (stitched > 0) {
-      lines.splice(lines.length - 1, 0, "\u8BE6\u60C5\u56FE\u62FC\u63A5\uFF1A" + stitched + " \u7EC4\uFF08\u4E0A\u4E0B\u5207\u7247\u8FD8\u539F\u4E3A\u6574\u56FE\uFF09");
+      lines.splice(lines.length - 1, 0, "\u8BE6\u60C5\u56FE\u62FC\u63A5\uFF1A" + stitched + " \u7EC4\uFF08\u4E0A\u4E0B\u5207\u7247\u65E0\u635F\u8FD8\u539F\u4E3A\u6574\u5F20 PNG\uFF09");
     }
     return lines.join("\n") + "\n";
   }
@@ -2138,15 +2138,15 @@
     }
     return size;
   }
-  function canvasToJpegBlob(canvas, quality) {
+  function canvasToBlob2(canvas, type, quality) {
     return new Promise((resolve) => {
       try {
         if (typeof canvas.convertToBlob === "function") {
-          canvas.convertToBlob({ type: "image/jpeg", quality }).then((b) => resolve(b || null), () => resolve(null));
+          canvas.convertToBlob({ type, quality }).then((b) => resolve(b || null), () => resolve(null));
           return;
         }
         if (typeof canvas.toBlob === "function") {
-          canvas.toBlob((b) => resolve(b || null), "image/jpeg", quality);
+          canvas.toBlob((b) => resolve(b || null), type, quality);
           return;
         }
         resolve(null);
@@ -2154,6 +2154,9 @@
         resolve(null);
       }
     });
+  }
+  function canvasToJpegBlob(canvas, quality) {
+    return canvasToBlob2(canvas, "image/jpeg", quality);
   }
   async function compressGoodsImageToLimit(bytes) {
     const source = await createImageBitmapSafe(bytes);
@@ -2617,12 +2620,12 @@
         ctx.drawImage(source, 0, y);
         y += sourceDimensions(source).height;
       }
-      const blob = await canvasToJpegBlob(canvas, 0.92);
+      const blob = await canvasToBlob2(canvas, "image/png", void 0);
       if (!blob) return null;
       const buffer = await blob.arrayBuffer();
       const bytes = new Uint8Array(buffer);
       if (!bytes.length) return null;
-      return { name: "", bytes, ext: "jpg", section: "detail", width, height, stitched: true };
+      return { name: "", bytes, ext: "png", section: "detail", width, height, stitched: true };
     } catch (_) {
       return null;
     } finally {

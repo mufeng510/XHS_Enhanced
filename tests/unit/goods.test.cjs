@@ -265,7 +265,8 @@ test('main-image compression planner respects toggle, section and size limit', (
   const api = load();
   const MB = 1024 * 1024;
   assert.equal(api.GOODS_COMPRESS_MAX_BYTES, 3 * MB);
-  assert.deepEqual(Array.from(api.JPEG_QUALITY_LADDER), [0.85, 0.75, 0.65, 0.55, 0.45]);
+  assert.deepEqual(Array.from(api.JPEG_QUALITY_LADDER), [0.98, 0.95, 0.92, 0.88, 0.82, 0.75, 0.65, 0.55, 0.45]);
+  assert.equal(api.JPEG_QUALITY_LADDER[0] > 0.9, true, 'compression starts at near-lossless quality');
   assert.equal(api.SCALE_DOWN_FACTOR, 0.85);
   assert.equal(api.SCALE_DOWN_MIN, 0.35);
   assert.equal(api.shouldCompressGoodsImage('main', 4 * MB, true), true);

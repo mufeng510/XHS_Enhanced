@@ -60,7 +60,9 @@ export function countGoodsSections(entries) {
 }
 
 export const GOODS_COMPRESS_MAX_BYTES = 3 * 1024 * 1024; // 主图压缩目标：3 MiB
-export const JPEG_QUALITY_LADDER = Object.freeze([0.85, 0.75, 0.65, 0.55, 0.45]);
+// 从接近无损的高画质开始试：PNG 原图重新编码为 JPEG 时，高画质往往也远小于
+// 3MB（实测同一张 2000×2000 图 q0.98 仅 1.2MB），没必要一上来就降到 0.85。
+export const JPEG_QUALITY_LADDER = Object.freeze([0.98, 0.95, 0.92, 0.88, 0.82, 0.75, 0.65, 0.55, 0.45]);
 // 尺寸压缩的渐进比例（在 JPEG 质量全部试完后启用，直到 ≤ 上限或到达下限）
 export const SCALE_DOWN_FACTOR = 0.85;
 export const SCALE_DOWN_MIN = 0.35;
@@ -400,7 +402,7 @@ export function buildGoodsInfoText(meta) {
   addCompressLine('SKU 图', m.compressSku);
   const stitched = Number(m.stitched) || 0;
   if (stitched > 0) {
-    lines.splice(lines.length - 1, 0, '详情图拼接：' + stitched + ' 组（上下切片还原为整图）');
+    lines.splice(lines.length - 1, 0, '详情图拼接：' + stitched + ' 组（上下切片无损还原为整张 PNG）');
   }
   return lines.join('\n') + '\n';
 }

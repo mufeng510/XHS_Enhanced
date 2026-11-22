@@ -786,26 +786,18 @@
     assert(zipBlobs.length === 1, 'one zip produced');
     const bytes = new Uint8Array(await zipBlobs[0].arrayBuffer());
     const text = new TextDecoder().decode(bytes);
-    assert(text.includes('详情图_01.jpg') && !text.includes('详情图_02.jpg'), 'two slices become a single 详情图_01.jpg');
-    // 从 zip 内嵌 JPEG 的 SOF 段读出尺寸，确认确实拼成 2000×2000。
-    let soi = -1;
-    for (let i = 0; i < bytes.length - 4; i += 1) {
-      if (bytes[i] === 0xff && bytes[i + 1] === 0xd8 && bytes[i + 2] === 0xff) { soi = i; break; }
+    assert(text.includes('详情图_01.png') && !text.includes('详情图_02'), 'two slices become a single lossless 详情图_01.png');
+    // 从 zip 内嵌 PNG 的 IHDR 读出尺寸，确认无损拼成 2000×2000。
+    const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    let pngStart = -1;
+    for (let i = 0; i < bytes.length - 24; i += 1) {
+      if (sig.every((v, k) => bytes[i + k] === v)) { pngStart = i; break; }
     }
-    let size = null;
-    for (let i = soi + 2; soi >= 0 && i < bytes.length - 9; ) {
-      if (bytes[i] !== 0xff) { i += 1; continue; }
-      const marker = bytes[i + 1];
-      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
-      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-        size = { w: (bytes[i + 7] << 8) | bytes[i + 8], h: (bytes[i + 5] << 8) | bytes[i + 6] };
-        break;
-      }
-      const len = (bytes[i + 2] << 8) | bytes[i + 3];
-      if (!len) break;
-      i += 2 + len;
-    }
-    assert(size && size.w === 2000 && size.h === 2000, 'stitched JPEG is 2000x2000 (1500+500)', size ? JSON.stringify(size) : '<no jpeg>');
+    const size = pngStart < 0 ? null : {
+      w: (bytes[pngStart + 16] << 24) | (bytes[pngStart + 17] << 16) | (bytes[pngStart + 18] << 8) | bytes[pngStart + 19],
+      h: (bytes[pngStart + 20] << 24) | (bytes[pngStart + 21] << 16) | (bytes[pngStart + 22] << 8) | bytes[pngStart + 23]
+    };
+    assert(size && size.w === 2000 && size.h === 2000, 'stitched PNG is 2000x2000 (1500+500)', size ? JSON.stringify(size) : '<no png>');
     api.setTestRoute('/search_result');
     await checkpoint();
   }

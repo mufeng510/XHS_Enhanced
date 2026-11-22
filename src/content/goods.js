@@ -217,15 +217,15 @@ async function imageSize(bytes) {
   return size;
 }
 
-function canvasToJpegBlob(canvas, quality) {
+function canvasToBlob(canvas, type, quality) {
   return new Promise(resolve => {
     try {
       if (typeof canvas.convertToBlob === 'function') {
-        canvas.convertToBlob({ type: 'image/jpeg', quality }).then(b => resolve(b || null), () => resolve(null));
+        canvas.convertToBlob({ type, quality }).then(b => resolve(b || null), () => resolve(null));
         return;
       }
       if (typeof canvas.toBlob === 'function') {
-        canvas.toBlob(b => resolve(b || null), 'image/jpeg', quality);
+        canvas.toBlob(b => resolve(b || null), type, quality);
         return;
       }
       resolve(null);
@@ -233,6 +233,10 @@ function canvasToJpegBlob(canvas, quality) {
       resolve(null);
     }
   });
+}
+
+function canvasToJpegBlob(canvas, quality) {
+  return canvasToBlob(canvas, 'image/jpeg', quality);
 }
 
 // Re-encode to JPEG, lowering quality step by step, then shrinking dimensions
@@ -679,12 +683,13 @@ async function stitchDetailGroup(entries) {
       ctx.drawImage(source, 0, y);
       y += sourceDimensions(source).height;
     }
-    const blob = await canvasToJpegBlob(canvas, 0.92);
+    // 拼接不做有损重编码：输出 PNG，像素与原切片完全一致。
+    const blob = await canvasToBlob(canvas, 'image/png', undefined);
     if (!blob) return null;
     const buffer = await blob.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     if (!bytes.length) return null;
-    return { name: '', bytes, ext: 'jpg', section: 'detail', width, height, stitched: true };
+    return { name: '', bytes, ext: 'png', section: 'detail', width, height, stitched: true };
   } catch (_) {
     return null;
   } finally {
