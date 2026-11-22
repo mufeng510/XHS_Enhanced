@@ -218,6 +218,49 @@ test('SKU section helpers classify, count, dedupe and name per spec', () => {
   assert(info.includes('SKU 规格：') && info.includes('原创红色小羊 → SKU_原创红色小羊_01.jpg'), 'info.txt maps spec → file');
 });
 
+test('detail-image slice planner and SKU compression limit', () => {
+  const api = load();
+  const MB = 1024 * 1024;
+  assert.equal(api.shouldCompressGoodsImage('sku', 4 * MB, true), true, 'SKU images obey the same 3MB limit');
+  assert.equal(api.shouldCompressGoodsImage('sku', 2 * MB, true), false);
+  assert.equal(api.shouldCompressGoodsImage('detail', 4 * MB, true), false, 'detail images are not size-compressed');
+  assert.equal(api.GOODS_DETAIL_SLICE_HEIGHT, 1500);
+
+  const pairs = api.planDetailImageGroups([
+    { section: 'main' },
+    { section: 'detail', width: 2000, height: 1500 },
+    { section: 'detail', width: 2000, height: 500 },
+    { section: 'detail', width: 1320, height: 1500 },
+    { section: 'detail', width: 1320, height: 175 },
+    { section: 'sku' }
+  ]);
+  // vm 跨 realm 的数组不能用 deepStrictEqual 直接比；逐组检查下标。
+  assert.equal(pairs.length, 4);
+  assert.deepEqual(Array.from(pairs[0]), [0]);
+  assert.deepEqual(Array.from(pairs[1]), [1, 2]);
+  assert.deepEqual(Array.from(pairs[2]), [3, 4]);
+  assert.deepEqual(Array.from(pairs[3]), [5]);
+  // 宽度不同 / 第二段不是更短 / 非切片高度 → 不拼接
+  const noPair = api.planDetailImageGroups([
+    { section: 'detail', width: 2000, height: 1500 },
+    { section: 'detail', width: 1800, height: 500 },
+    { section: 'detail', width: 2000, height: 1500 },
+    { section: 'detail', width: 2000, height: 1500 },
+    { section: 'detail', width: 2000, height: 900 }
+  ]);
+  assert.equal(noPair.length, 4, 'only the genuine 1500+900 pair merges; width/equal-height pairs do not');
+  assert.deepEqual(Array.from(noPair[3]), [3, 4]);
+
+  const info = api.buildGoodsInfoText({
+    pageUrl: 'u', goodsId: 'g', title: 't', scannedAt: 'now', count: 5, mode: 'png',
+    stitched: 2,
+    compressMain: { enabled: true, compressed: 1, failed: 0, oversize: 0 },
+    compressSku: { enabled: true, compressed: 3, failed: 1, oversize: 1 }
+  });
+  assert(info.includes('SKU 图压缩：开启') && info.includes('已压缩 3 张'), 'info.txt reports SKU compression');
+  assert(info.includes('详情图拼接：2 组'), 'info.txt reports stitched detail groups');
+});
+
 test('main-image compression planner respects toggle, section and size limit', () => {
   const api = load();
   const MB = 1024 * 1024;

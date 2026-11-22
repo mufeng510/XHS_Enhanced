@@ -1676,7 +1676,7 @@
   var SCALE_DOWN_MIN = 0.35;
   function shouldCompressGoodsImage(section, byteLength, enabled) {
     if (!enabled) return false;
-    if (section !== "main") return false;
+    if (section !== "main" && section !== "sku") return false;
     const size = Number(byteLength);
     if (!Number.isFinite(size) || size <= 0) return false;
     return size > GOODS_COMPRESS_MAX_BYTES;
@@ -1788,6 +1788,27 @@
   }
   function normalizeGoodsSection(value) {
     return value === "main" || value === "detail" || value === "sku" ? value : "other";
+  }
+  var GOODS_DETAIL_SLICE_HEIGHT = 1500;
+  function planDetailImageGroups(entries) {
+    const list = Array.isArray(entries) ? entries : [];
+    const groups = [];
+    for (let i = 0; i < list.length; i += 1) {
+      const item = list[i];
+      const next = list[i + 1];
+      const w = Math.round(Number(item && item.width) || 0);
+      const h = Math.round(Number(item && item.height) || 0);
+      const nw = Math.round(Number(next && next.width) || 0);
+      const nh = Math.round(Number(next && next.height) || 0);
+      const isSplit = item && item.section === "detail" && next && next.section === "detail" && w > 0 && nw === w && h === GOODS_DETAIL_SLICE_HEIGHT && nh > 0 && nh < GOODS_DETAIL_SLICE_HEIGHT;
+      if (isSplit) {
+        groups.push([i, i + 1]);
+        i += 1;
+      } else {
+        groups.push([i]);
+      }
+    }
+    return groups;
   }
   function dedupeSkuEntries(entries) {
     const seen = /* @__PURE__ */ new Set();
@@ -1918,13 +1939,19 @@
       }
       lines.splice(sourceAt >= 0 ? sourceAt : lines.length, 0, ...skuLines);
     }
-    const compress = m.compressMain && typeof m.compressMain === "object" ? m.compressMain : null;
-    if (compress) {
-      const pieces = ["\u4E3B\u56FE\u538B\u7F29\uFF1A" + (compress.enabled ? "\u5F00\u542F\uFF08\u76EE\u6807 \u22643MB\uFF09" : "\u5173\u95ED")];
-      if (Number(compress.compressed) > 0) pieces.push("\u5DF2\u538B\u7F29 " + Number(compress.compressed) + " \u5F20");
-      if (Number(compress.oversize) > 0) pieces.push("\u4ECD\u8D85\u8FC7 3MB " + Number(compress.oversize) + " \u5F20");
-      if (Number(compress.failed) > 0) pieces.push("\u65E0\u6CD5\u89E3\u7801 " + Number(compress.failed) + " \u5F20\uFF08\u4FDD\u7559\u539F\u56FE\uFF09");
+    const addCompressLine = (label, meta2) => {
+      if (!meta2 || typeof meta2 !== "object") return;
+      const pieces = [label + "\u538B\u7F29\uFF1A" + (meta2.enabled ? "\u5F00\u542F\uFF08\u76EE\u6807 \u22643MB\uFF09" : "\u5173\u95ED")];
+      if (Number(meta2.compressed) > 0) pieces.push("\u5DF2\u538B\u7F29 " + Number(meta2.compressed) + " \u5F20");
+      if (Number(meta2.oversize) > 0) pieces.push("\u4ECD\u8D85\u8FC7 3MB " + Number(meta2.oversize) + " \u5F20");
+      if (Number(meta2.failed) > 0) pieces.push("\u65E0\u6CD5\u89E3\u7801 " + Number(meta2.failed) + " \u5F20\uFF08\u4FDD\u7559\u539F\u56FE\uFF09");
       lines.splice(lines.length - 1, 0, pieces.join("\uFF0C"));
+    };
+    addCompressLine("\u4E3B\u56FE", m.compressMain);
+    addCompressLine("SKU \u56FE", m.compressSku);
+    const stitched = Number(m.stitched) || 0;
+    if (stitched > 0) {
+      lines.splice(lines.length - 1, 0, "\u8BE6\u60C5\u56FE\u62FC\u63A5\uFF1A" + stitched + " \u7EC4\uFF08\u4E0A\u4E0B\u5207\u7247\u8FD8\u539F\u4E3A\u6574\u56FE\uFF09");
     }
     return lines.join("\n") + "\n";
   }
@@ -2100,6 +2127,16 @@
     const width = Number(source && (source.width || source.naturalWidth)) || 0;
     const height = Number(source && (source.height || source.naturalHeight)) || 0;
     return { width, height };
+  }
+  async function imageSize(bytes) {
+    const source = await createImageBitmapSafe(bytes);
+    if (!source) return {};
+    const size = sourceDimensions(source);
+    try {
+      if (source.close) source.close();
+    } catch (_) {
+    }
+    return size;
   }
   function canvasToJpegBlob(canvas, quality) {
     return new Promise((resolve) => {
@@ -2453,7 +2490,7 @@
         setStatus("\u6B63\u5728\u4E0B\u8F7D " + done + "/" + total + "\u2026");
         return packEntry(url, res, section, skuName);
       });
-    }).then((packed) => {
+    }).then(async (packed) => {
       const fetched = [];
       for (const item of packed) {
         if (item && item.entry) fetched.push(item.entry);
@@ -2464,10 +2501,26 @@
         setStatus("\u5168\u90E8 " + total + " \u5F20\u56FE\u7247\u4E0B\u8F7D\u5931\u8D25");
         return;
       }
+      let stitchedCount = 0;
+      const assembled = [];
+      for (const group of planDetailImageGroups(fetched)) {
+        if (group.length === 1) {
+          assembled.push(fetched[group[0]]);
+          continue;
+        }
+        const merged = await stitchDetailGroup(group.map((index) => fetched[index]));
+        if (merged) {
+          assembled.push(merged);
+          stitchedCount += 1;
+        } else {
+          for (const index of group) assembled.push(fetched[index]);
+        }
+      }
+      const finalEntries = assembled;
       const sectionSeq = { main: 0, detail: 0, sku: 0, other: 0 };
       const skuSeqByName = /* @__PURE__ */ new Map();
       const skuManifest = [];
-      const entries = fetched.map((entry) => {
+      const entries = finalEntries.map((entry) => {
         const section = entry.section === "main" || entry.section === "detail" || entry.section === "sku" ? entry.section : "other";
         if (section === "sku") {
           const skuName = entry.skuName || "\u89C4\u683C";
@@ -2481,10 +2534,15 @@
         sectionSeq[section] = seq + 1;
         return { name: buildGoodsImageFileName(seq, entry.ext, section), bytes: entry.bytes };
       });
-      const sectionCounts = countGoodsSections(fetched);
-      const compressedCount = fetched.filter((entry) => entry.compressed).length;
-      const compressFailedCount = fetched.filter((entry) => entry.compressFailed).length;
-      const oversizeMainCount = fetched.filter((entry) => entry.section === "main" && entry.oversize).length;
+      const sectionCounts = countGoodsSections(finalEntries);
+      const compressStats = (section) => ({
+        enabled: compressMainEnabled,
+        compressed: finalEntries.filter((entry) => entry.section === section && entry.compressed).length,
+        failed: finalEntries.filter((entry) => entry.section === section && entry.compressFailed).length,
+        oversize: finalEntries.filter((entry) => entry.section === section && entry.oversize).length
+      });
+      const mainStats = compressStats("main");
+      const skuStats = compressStats("sku");
       const info = buildGoodsInfoText({
         pageUrl,
         goodsId,
@@ -2494,7 +2552,9 @@
         mode: formatMode,
         sections: sectionCounts,
         skus: skuManifest,
-        compressMain: { enabled: compressMainEnabled, compressed: compressedCount, failed: compressFailedCount, oversize: oversizeMainCount }
+        stitched: stitchedCount,
+        compressMain: mainStats,
+        compressSku: skuStats
       });
       entries.unshift({ name: "00_\u5546\u54C1\u4FE1\u606F.txt", bytes: utf8Bytes(info) });
       setStatus("\u6B63\u5728\u6253\u5305 " + entries.length + " \u4E2A\u6587\u4EF6\u2026");
@@ -2510,10 +2570,13 @@
         setBusy(false);
         const details = [];
         if (failed) details.push("\u5931\u8D25 " + failed + " \u5F20");
-        const skuCount = fetched.filter((entry) => entry.section === "sku").length;
+        const skuCount = finalEntries.filter((entry) => entry.section === "sku").length;
         if (skuCount > 0) details.push("SKU \u56FE " + skuCount + " \u5F20");
-        if (compressedCount > 0) details.push("\u4E3B\u56FE\u5DF2\u538B\u7F29 " + compressedCount + " \u5F20");
-        if (oversizeMainCount > 0) details.push("\u4E3B\u56FE " + oversizeMainCount + " \u5F20\u4ECD\u8D85\u8FC7 3MB");
+        if (stitchedCount > 0) details.push("\u8BE6\u60C5\u56FE\u62FC\u63A5 " + stitchedCount + " \u7EC4");
+        if (mainStats.compressed > 0) details.push("\u4E3B\u56FE\u5DF2\u538B\u7F29 " + mainStats.compressed + " \u5F20");
+        if (skuStats.compressed > 0) details.push("SKU \u56FE\u5DF2\u538B\u7F29 " + skuStats.compressed + " \u5F20");
+        if (mainStats.oversize > 0) details.push("\u4E3B\u56FE " + mainStats.oversize + " \u5F20\u4ECD\u8D85\u8FC7 3MB");
+        if (skuStats.oversize > 0) details.push("SKU \u56FE " + skuStats.oversize + " \u5F20\u4ECD\u8D85\u8FC7 3MB");
         setStatus("\u5DF2\u4E0B\u8F7D " + (entries.length - 1) + " \u5F20\u56FE\u7247" + (details.length ? "\uFF08" + details.join("\uFF1B") + "\uFF09" : "") + "\uFF08zip \u5DF2\u4FDD\u5B58\uFF09");
       } catch (_) {
         setBusy(false);
@@ -2524,11 +2587,65 @@
       setStatus("\u4E0B\u8F7D\u5931\u8D25");
     });
   }
+  async function stitchDetailGroup(entries) {
+    const sources = [];
+    try {
+      for (const entry of entries) {
+        const source = await createImageBitmapSafe(entry && entry.bytes);
+        if (!source) return null;
+        sources.push(source);
+      }
+      const sizes = sources.map(sourceDimensions);
+      const width = sizes[0].width;
+      const height = sizes.reduce((sum, size) => sum + size.height, 0);
+      if (!width || !height) return null;
+      let canvas;
+      try {
+        if (typeof OffscreenCanvas === "function") canvas = new OffscreenCanvas(width, height);
+        else if (ROOT.document) {
+          canvas = ROOT.document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+        } else return null;
+      } catch (_) {
+        return null;
+      }
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+      let y = 0;
+      for (const source of sources) {
+        ctx.drawImage(source, 0, y);
+        y += sourceDimensions(source).height;
+      }
+      const blob = await canvasToJpegBlob(canvas, 0.92);
+      if (!blob) return null;
+      const buffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      if (!bytes.length) return null;
+      return { name: "", bytes, ext: "jpg", section: "detail", width, height, stitched: true };
+    } catch (_) {
+      return null;
+    } finally {
+      for (const source of sources) {
+        try {
+          if (source.close) source.close();
+        } catch (_) {
+        }
+      }
+    }
+  }
   async function packEntry(url, res, section, skuName) {
     const bytes = res && res.ok && res.bytes && res.bytes.length ? res.bytes : null;
     if (!bytes) return { entry: null };
     const ext = extForImage(bytes, res.contentType, url);
     const common = { name: "", ext, section, skuName: skuName || "" };
+    if (section === "detail") {
+      const size = await imageSize(bytes);
+      if (size.width && size.height) {
+        common.width = size.width;
+        common.height = size.height;
+      }
+    }
     if (shouldCompressGoodsImage(section, bytes.length, compressMainEnabled)) {
       const blob = await compressGoodsImageToLimit(bytes);
       if (blob) {
@@ -2629,7 +2746,7 @@
     compressToggle.checked = compressMainEnabled;
     compressToggle.addEventListener("change", onCompressToggle);
     compressLabel.appendChild(compressToggle);
-    compressLabel.appendChild(doc.createTextNode("\u4E3B\u56FE\u5927\u5C0F\u538B\u7F29\u5230 3MB \u4EE5\u5185"));
+    compressLabel.appendChild(doc.createTextNode("\u4E3B\u56FE / SKU \u56FE\u538B\u7F29\u5230 3MB \u4EE5\u5185"));
     element.appendChild(compressLabel);
     const skuLabel = doc.createElement("label");
     skuLabel.className = "xhs-enhanced-goods-check";
@@ -4388,6 +4505,8 @@
     scaledDimensions,
     dedupeSkuEntries,
     buildGoodsSkuImageFileName,
+    planDetailImageGroups,
+    GOODS_DETAIL_SLICE_HEIGHT,
     buildDetailNoteUrl,
     resolveSaveUrlFromCard,
     cardNoteTargetId,

@@ -66,10 +66,10 @@ export const SCALE_DOWN_FACTOR = 0.85;
 export const SCALE_DOWN_MIN = 0.35;
 export const SCALE_DOWN_STEP = 0.15;
 
-// 是否需要重新压缩：仅主图、开关打开、且当前字节数超限时为 true。
+// 是否需要重新压缩：主图与 SKU 图、开关打开、且当前字节数超限时为 true。
 export function shouldCompressGoodsImage(section, byteLength, enabled) {
   if (!enabled) return false;
-  if (section !== 'main') return false;
+  if (section !== 'main' && section !== 'sku') return false;
   const size = Number(byteLength);
   if (!Number.isFinite(size) || size <= 0) return false;
   return size > GOODS_COMPRESS_MAX_BYTES;
@@ -201,6 +201,34 @@ export function dedupeGoodsImages(urls) {
 
 export function normalizeGoodsSection(value) {
   return value === 'main' || value === 'detail' || value === 'sku' ? value : 'other';
+}
+
+// 详情图的切片规律（真机 API graphicDetailsV4.images 实测）：一张长图被拆成
+// 连续两张——前一张 W×1500，后一张 W×<1500（宽度相同），如下载时两张都被
+// 保留就会看到“详情图_01 是上半截、详情图_02 是下半截”。据此规划拼接分组。
+export const GOODS_DETAIL_SLICE_HEIGHT = 1500;
+
+export function planDetailImageGroups(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  const groups = [];
+  for (let i = 0; i < list.length; i += 1) {
+    const item = list[i];
+    const next = list[i + 1];
+    const w = Math.round(Number(item && item.width) || 0);
+    const h = Math.round(Number(item && item.height) || 0);
+    const nw = Math.round(Number(next && next.width) || 0);
+    const nh = Math.round(Number(next && next.height) || 0);
+    const isSplit = item && item.section === 'detail' && next && next.section === 'detail'
+      && w > 0 && nw === w && h === GOODS_DETAIL_SLICE_HEIGHT
+      && nh > 0 && nh < GOODS_DETAIL_SLICE_HEIGHT;
+    if (isSplit) {
+      groups.push([i, i + 1]);
+      i += 1; // 下一张已并入本组
+    } else {
+      groups.push([i]);
+    }
+  }
+  return groups;
 }
 
 // SKU 预览图来自页面「选规格」接口；同一规格名 + 同一底层图片的重复项折叠，
@@ -360,13 +388,19 @@ export function buildGoodsInfoText(meta) {
     }
     lines.splice(sourceAt >= 0 ? sourceAt : lines.length, 0, ...skuLines);
   }
-  const compress = m.compressMain && typeof m.compressMain === 'object' ? m.compressMain : null;
-  if (compress) {
-    const pieces = ['主图压缩：' + (compress.enabled ? '开启（目标 ≤3MB）' : '关闭')];
-    if (Number(compress.compressed) > 0) pieces.push('已压缩 ' + Number(compress.compressed) + ' 张');
-    if (Number(compress.oversize) > 0) pieces.push('仍超过 3MB ' + Number(compress.oversize) + ' 张');
-    if (Number(compress.failed) > 0) pieces.push('无法解码 ' + Number(compress.failed) + ' 张（保留原图）');
+  const addCompressLine = (label, meta) => {
+    if (!meta || typeof meta !== 'object') return;
+    const pieces = [label + '压缩：' + (meta.enabled ? '开启（目标 ≤3MB）' : '关闭')];
+    if (Number(meta.compressed) > 0) pieces.push('已压缩 ' + Number(meta.compressed) + ' 张');
+    if (Number(meta.oversize) > 0) pieces.push('仍超过 3MB ' + Number(meta.oversize) + ' 张');
+    if (Number(meta.failed) > 0) pieces.push('无法解码 ' + Number(meta.failed) + ' 张（保留原图）');
     lines.splice(lines.length - 1, 0, pieces.join('，'));
+  };
+  addCompressLine('主图', m.compressMain);
+  addCompressLine('SKU 图', m.compressSku);
+  const stitched = Number(m.stitched) || 0;
+  if (stitched > 0) {
+    lines.splice(lines.length - 1, 0, '详情图拼接：' + stitched + ' 组（上下切片还原为整图）');
   }
   return lines.join('\n') + '\n';
 }

@@ -32,7 +32,8 @@ import {
   SCALE_DOWN_MIN,
   scaledDimensions,
   dedupeSkuEntries,
-  buildGoodsSkuImageFileName
+  buildGoodsSkuImageFileName,
+  planDetailImageGroups
 } from '../lib/goods.js';
 import { fetchBytes } from '../lib/remote.js';
 import { buildZip, splitZipEntries, MAX_ZIP_BYTES } from '../lib/zip.js';
@@ -206,6 +207,14 @@ function sourceDimensions(source) {
   const width = Number(source && (source.width || source.naturalWidth)) || 0;
   const height = Number(source && (source.height || source.naturalHeight)) || 0;
   return { width, height };
+}
+
+async function imageSize(bytes) {
+  const source = await createImageBitmapSafe(bytes);
+  if (!source) return {};
+  const size = sourceDimensions(source);
+  try { if (source.close) source.close(); } catch (_) {}
+  return size;
 }
 
 function canvasToJpegBlob(canvas, quality) {
@@ -547,7 +556,7 @@ function startPacking(images, doc) {
       setStatus('正在下载 ' + done + '/' + total + '…');
       return packEntry(url, res, section, skuName);
     });
-  }).then(packed => {
+  }).then(async packed => {
     const fetched = [];
     for (const item of packed) {
       if (item && item.entry) fetched.push(item.entry);
@@ -558,11 +567,28 @@ function startPacking(images, doc) {
       setStatus('全部 ' + total + ' 张图片下载失败');
       return;
     }
+    // 详情图被切成 W×1500 + W×短图 两张时，先拼回整图再命名打包。
+    let stitchedCount = 0;
+    const assembled = [];
+    for (const group of planDetailImageGroups(fetched)) {
+      if (group.length === 1) {
+        assembled.push(fetched[group[0]]);
+        continue;
+      }
+      const merged = await stitchDetailGroup(group.map(index => fetched[index]));
+      if (merged) {
+        assembled.push(merged);
+        stitchedCount += 1;
+      } else {
+        for (const index of group) assembled.push(fetched[index]); // 拼接失败保留原切片
+      }
+    }
+    const finalEntries = assembled;
     // Per-section numbering: 主图_01.., 详情图_01.., SKU_<规格名>_01.., 其它_01..
     const sectionSeq = { main: 0, detail: 0, sku: 0, other: 0 };
     const skuSeqByName = new Map();
     const skuManifest = [];
-    const entries = fetched.map(entry => {
+    const entries = finalEntries.map(entry => {
       const section = entry.section === 'main' || entry.section === 'detail' || entry.section === 'sku'
         ? entry.section : 'other';
       if (section === 'sku') {
@@ -577,14 +603,19 @@ function startPacking(images, doc) {
       sectionSeq[section] = seq + 1;
       return { name: buildGoodsImageFileName(seq, entry.ext, section), bytes: entry.bytes };
     });
-    const sectionCounts = countGoodsSections(fetched);
-    const compressedCount = fetched.filter(entry => entry.compressed).length;
-    const compressFailedCount = fetched.filter(entry => entry.compressFailed).length;
-    const oversizeMainCount = fetched.filter(entry => entry.section === 'main' && entry.oversize).length;
+    const sectionCounts = countGoodsSections(finalEntries);
+    const compressStats = section => ({
+      enabled: compressMainEnabled,
+      compressed: finalEntries.filter(entry => entry.section === section && entry.compressed).length,
+      failed: finalEntries.filter(entry => entry.section === section && entry.compressFailed).length,
+      oversize: finalEntries.filter(entry => entry.section === section && entry.oversize).length
+    });
+    const mainStats = compressStats('main');
+    const skuStats = compressStats('sku');
     const info = buildGoodsInfoText({
       pageUrl, goodsId, title, scannedAt, count: entries.length, mode: formatMode,
-      sections: sectionCounts, skus: skuManifest,
-      compressMain: { enabled: compressMainEnabled, compressed: compressedCount, failed: compressFailedCount, oversize: oversizeMainCount }
+      sections: sectionCounts, skus: skuManifest, stitched: stitchedCount,
+      compressMain: mainStats, compressSku: skuStats
     });
     entries.unshift({ name: '00_商品信息.txt', bytes: utf8Bytes(info) });
     setStatus('正在打包 ' + entries.length + ' 个文件…');
@@ -600,10 +631,13 @@ function startPacking(images, doc) {
       setBusy(false);
       const details = [];
       if (failed) details.push('失败 ' + failed + ' 张');
-      const skuCount = fetched.filter(entry => entry.section === 'sku').length;
+      const skuCount = finalEntries.filter(entry => entry.section === 'sku').length;
       if (skuCount > 0) details.push('SKU 图 ' + skuCount + ' 张');
-      if (compressedCount > 0) details.push('主图已压缩 ' + compressedCount + ' 张');
-      if (oversizeMainCount > 0) details.push('主图 ' + oversizeMainCount + ' 张仍超过 3MB');
+      if (stitchedCount > 0) details.push('详情图拼接 ' + stitchedCount + ' 组');
+      if (mainStats.compressed > 0) details.push('主图已压缩 ' + mainStats.compressed + ' 张');
+      if (skuStats.compressed > 0) details.push('SKU 图已压缩 ' + skuStats.compressed + ' 张');
+      if (mainStats.oversize > 0) details.push('主图 ' + mainStats.oversize + ' 张仍超过 3MB');
+      if (skuStats.oversize > 0) details.push('SKU 图 ' + skuStats.oversize + ' 张仍超过 3MB');
       setStatus('已下载 ' + (entries.length - 1) + ' 张图片' + (details.length ? '（' + details.join('；') + '）' : '') + '（zip 已保存）');
     } catch (_) {
       setBusy(false);
@@ -615,6 +649,51 @@ function startPacking(images, doc) {
   });
 }
 
+// 把一组上下切片（W×1500 + W×<1500）还原成一张长图：按原始尺寸从上到下绘制。
+// 任一步失败则返回 null，调用方保留原始切片，不影响其余图片。
+async function stitchDetailGroup(entries) {
+  const sources = [];
+  try {
+    for (const entry of entries) {
+      const source = await createImageBitmapSafe(entry && entry.bytes);
+      if (!source) return null;
+      sources.push(source);
+    }
+    const sizes = sources.map(sourceDimensions);
+    const width = sizes[0].width;
+    const height = sizes.reduce((sum, size) => sum + size.height, 0);
+    if (!width || !height) return null;
+    let canvas;
+    try {
+      if (typeof OffscreenCanvas === 'function') canvas = new OffscreenCanvas(width, height);
+      else if (ROOT.document) {
+        canvas = ROOT.document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+      } else return null;
+    } catch (_) { return null; }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    let y = 0;
+    for (const source of sources) {
+      ctx.drawImage(source, 0, y);
+      y += sourceDimensions(source).height;
+    }
+    const blob = await canvasToJpegBlob(canvas, 0.92);
+    if (!blob) return null;
+    const buffer = await blob.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    if (!bytes.length) return null;
+    return { name: '', bytes, ext: 'jpg', section: 'detail', width, height, stitched: true };
+  } catch (_) {
+    return null;
+  } finally {
+    for (const source of sources) {
+      try { if (source.close) source.close(); } catch (_) { /* ignore */ }
+    }
+  }
+}
+
 // Pack one fetched image into a zip entry payload (name assigned later, per section).
 // Main images larger than 3MB are re-encoded (lower JPEG quality, then smaller
 // dimensions) when the panel's 主图压缩 switch is on.
@@ -623,6 +702,13 @@ async function packEntry(url, res, section, skuName) {
   if (!bytes) return { entry: null };
   const ext = extForImage(bytes, res.contentType, url);
   const common = { name: '', ext, section, skuName: skuName || '' };
+  if (section === 'detail') {
+    const size = await imageSize(bytes);
+    if (size.width && size.height) {
+      common.width = size.width;
+      common.height = size.height;
+    }
+  }
   if (shouldCompressGoodsImage(section, bytes.length, compressMainEnabled)) {
     const blob = await compressGoodsImageToLimit(bytes);
     if (blob) {
@@ -736,7 +822,7 @@ function buildPanel() {
   compressToggle.checked = compressMainEnabled;
   compressToggle.addEventListener('change', onCompressToggle);
   compressLabel.appendChild(compressToggle);
-  compressLabel.appendChild(doc.createTextNode('主图大小压缩到 3MB 以内'));
+  compressLabel.appendChild(doc.createTextNode('主图 / SKU 图压缩到 3MB 以内'));
   element.appendChild(compressLabel);
 
   const skuLabel = doc.createElement('label');

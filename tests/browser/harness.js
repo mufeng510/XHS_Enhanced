@@ -749,6 +749,67 @@
     await checkpoint();
   }
 
+  async function goodsDetailStitch() {
+    api.setTestRoute('/goods-detail/685d0fe3c16548001691655c');
+    await checkpoint();
+    assert(Boolean(document.getElementById('xhs-enhanced-goods-panel')), 'goods panel present for stitch test');
+    sandbox.replaceChildren();
+    const detail = document.createElement('div');
+    detail.className = 'graphic-detail-container';
+    const upper = document.createElement('img');
+    upper.src = 'https://mall-i1.xhscdn.com/b/stitch-a-0000000000000000000000000001';
+    const lower = document.createElement('img');
+    lower.src = 'https://mall-i1.xhscdn.com/b/stitch-b-0000000000000000000000000002';
+    detail.append(upper, lower);
+    sandbox.appendChild(detail);
+    document.getElementById('xhs-enhanced-goods-scan').click();
+    await checkpoint();
+    const snapshot = api.getGoodsImagesSnapshot();
+    const slices = snapshot.filter(entry => /stitch-[ab]/.test(entry.url));
+    assert(slices.length === 2 && slices.every(entry => entry.section === 'detail'), 'scan finds both detail slices', JSON.stringify(snapshot));
+    const zipBlobs = [];
+    const originalCreateObjectURL = URL.createObjectURL.bind(URL);
+    const originalAnchorClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = blob => { zipBlobs.push(blob); return 'blob:xhs-enhanced-stitch-' + zipBlobs.length; };
+    HTMLAnchorElement.prototype.click = function noop() {};
+    document.getElementById('xhs-enhanced-goods-download').click();
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      const s = document.getElementById('xhs-enhanced-goods-status');
+      if (s && /已下载|失败/.test(s.textContent)) break;
+      await delay(50);
+    }
+    URL.createObjectURL = originalCreateObjectURL;
+    HTMLAnchorElement.prototype.click = originalAnchorClick;
+    const status = document.getElementById('xhs-enhanced-goods-status');
+    assert(status && /详情图拼接 1 组/.test(status.textContent), 'download reports one stitched detail group', status ? status.textContent : '<none>');
+    assert(zipBlobs.length === 1, 'one zip produced');
+    const bytes = new Uint8Array(await zipBlobs[0].arrayBuffer());
+    const text = new TextDecoder().decode(bytes);
+    assert(text.includes('详情图_01.jpg') && !text.includes('详情图_02.jpg'), 'two slices become a single 详情图_01.jpg');
+    // 从 zip 内嵌 JPEG 的 SOF 段读出尺寸，确认确实拼成 2000×2000。
+    let soi = -1;
+    for (let i = 0; i < bytes.length - 4; i += 1) {
+      if (bytes[i] === 0xff && bytes[i + 1] === 0xd8 && bytes[i + 2] === 0xff) { soi = i; break; }
+    }
+    let size = null;
+    for (let i = soi + 2; soi >= 0 && i < bytes.length - 9; ) {
+      if (bytes[i] !== 0xff) { i += 1; continue; }
+      const marker = bytes[i + 1];
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        size = { w: (bytes[i + 7] << 8) | bytes[i + 8], h: (bytes[i + 5] << 8) | bytes[i + 6] };
+        break;
+      }
+      const len = (bytes[i + 2] << 8) | bytes[i + 3];
+      if (!len) break;
+      i += 2 + len;
+    }
+    assert(size && size.w === 2000 && size.h === 2000, 'stitched JPEG is 2000x2000 (1500+500)', size ? JSON.stringify(size) : '<no jpeg>');
+    api.setTestRoute('/search_result');
+    await checkpoint();
+  }
+
   async function dynamicAndAttributes() {
     api.setTestRoute('/search_result');
     await useFixture('dynamic-source', '#dynamic-fixture');
@@ -999,6 +1060,7 @@
       await goodsDetailDownload();
       await goodsSkuImages();
       await goodsSkuDomFallback();
+      await goodsDetailStitch();
       await dynamicAndAttributes();
       await jumpNavigation();
       await focusMode();
